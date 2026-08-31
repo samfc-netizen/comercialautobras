@@ -565,6 +565,67 @@ def carregar_vendas_mensais(pasta: Path, cadastro: pd.DataFrame):
     return pd.concat(frames, ignore_index=True), meses_importados, arquivos_lidos
 
 
+def identificar_mes_ano_arquivo_produtos(nome: str):
+    """Retorna (ano, mês) para nomes como PRODUTOS AGOSTO 2026.xlsx ou PRODUTOS SETEMBRO DE 2026.xlsx."""
+    stem = normalize_text_key(Path(nome).stem)
+    m = re.fullmatch(
+        r"(?:PADRAO\s+)?PRODUTOS\s+"
+        r"(JANEIRO|FEVEREIRO|MARCO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)"
+        r"(?:\s+DE)?\s+(20\d{2})",
+        stem,
+    )
+    if not m:
+        return None
+    mes = MESES_ARQUIVO[m.group(1)]
+    ano = int(m.group(2))
+    if pd.Timestamp(ano, mes, 1) < INICIO_ARQUIVOS_MENSAIS:
+        return None
+    return ano, mes
+
+
+def carregar_produtos_mensais(pasta: Path):
+    """Carrega relatórios mensais de produtos e injeta MÊS/ANO pelo nome do arquivo."""
+    frames = []
+    meses_importados = set()
+    arquivos_lidos = []
+
+    for arq in sorted(pasta.glob("*.xlsx")):
+        periodo = identificar_mes_ano_arquivo_produtos(arq.name)
+        if not periodo:
+            continue
+        ano_nome, mes_nome = periodo
+
+        try:
+            d = pd.read_excel(arq, header=1)
+            d.columns = [normalize_col(c) for c in d.columns]
+        except Exception:
+            continue
+
+        obrig = ["Produto", "Quantidade", "Custo total", "Valor total"]
+        if any(c not in d.columns for c in obrig):
+            continue
+
+        # Remove linhas em branco e rodapés/totais: só produto preenchido é linha comercial.
+        d = d[d["Produto"].notna()].copy()
+        d["Produto"] = d["Produto"].astype(str).str.strip()
+        d = d[d["Produto"] != ""].copy()
+
+        d["Quantidade"] = d["Quantidade"].apply(parse_brl_number)
+        d["Custo total"] = d["Custo total"].apply(parse_brl_number)
+        d["Valor total"] = d["Valor total"].apply(parse_brl_number)
+        d["MÊS"] = MESES_PT[mes_nome - 1]
+        d["ANO"] = ano_nome
+
+        manter = ["Produto", "Quantidade", "MÊS", "ANO", "Valor total", "Custo total"]
+        frames.append(d[manter].copy())
+        meses_importados.add((ano_nome, mes_nome))
+        arquivos_lidos.append(arq.name)
+
+    if not frames:
+        return pd.DataFrame(), set(), []
+    return pd.concat(frames, ignore_index=True), meses_importados, arquivos_lidos
+
+
 def abc_classification(df_in: pd.DataFrame, value_col: str, label_col: str = "Produto") -> pd.DataFrame:
     """
     Gera Curva ABC baseada em value_col (Quantidade ou Faturamento).
@@ -757,6 +818,25 @@ df_p.columns = [normalize_col(c) for c in df_p.columns]
 df_c.columns = [normalize_col(c) for c in df_c.columns]
 df_l.columns = [normalize_col(c) for c in df_l.columns]
 
+# Produtos mensais a partir de agosto/2026. Cada arquivo mensal substitui somente
+# o respectivo mês existente na BASE DE PRODUTOS, evitando duplicidade.
+PASTA_DADOS = Path(".")
+df_prod_mensal, meses_prod_mensais, arquivos_prod_mensais = carregar_produtos_mensais(PASTA_DADOS)
+if meses_prod_mensais and {"ANO", "MÊS"}.issubset(df_p.columns):
+    df_p_hist = df_p.copy()
+    ano_hist = pd.to_numeric(df_p_hist["ANO"], errors="coerce")
+    mes_hist = df_p_hist["MÊS"].apply(parse_mes_to_num)
+    chaves_hist = list(zip(ano_hist, mes_hist))
+    manter_hist_prod = [
+        not (pd.notna(a) and pd.notna(m) and (int(a), int(m)) in meses_prod_mensais)
+        for a, m in chaves_hist
+    ]
+    df_p_hist = df_p_hist.loc[manter_hist_prod].copy()
+    df_p = pd.concat([df_p_hist, df_prod_mensal], ignore_index=True, sort=False)
+elif meses_prod_mensais:
+    # Se a base histórica não tiver MÊS/ANO válidos, preserva o que existe e anexa os mensais.
+    df_p = pd.concat([df_p, df_prod_mensal], ignore_index=True, sort=False)
+
 # =============================
 # PREP VENDAS
 # =============================
@@ -808,9 +888,35 @@ df["MARGEM_BRUTA_%"] = df.apply(
 )
 
 if arquivos_mensais:
-    st.caption("Arquivos mensais incorporados: " + ", ".join(arquivos_mensais))
+    st.caption("Arquivos mensais de vendas incorporados: " + ", ".join(arquivos_mensais))
     if df_cadastro_ext.empty:
         st.warning("Arquivos mensais encontrados, mas o arquivo CADASTRO DE CLIENTES.xlsx não foi localizado. Cidade, bairro, UF e classificação podem ficar sem preenchimento nas vendas novas.")
+
+if arquivos_prod_mensais:
+    st.caption("Arquivos mensais de produtos incorporados: " + ", ".join(arquivos_prod_mensais))
+
+# Validação cadastral: sinaliza qualquer cliente sem UF e/ou cidade/localização.
+df["UF"] = df["UF"].fillna("").astype(str).str.strip()
+df["LOCALIZAÇÃO"] = df["LOCALIZAÇÃO"].fillna("").astype(str).str.strip()
+mask_geo_incompleta = (df["UF"] == "") | (df["LOCALIZAÇÃO"] == "")
+if mask_geo_incompleta.any():
+    geo_pend = (
+        df.loc[mask_geo_incompleta]
+        .groupby(["Cliente", "UF", "LOCALIZAÇÃO"], dropna=False, as_index=False)
+        .agg(FATURAMENTO=("Valor total", "sum"))
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+    qtd_geo = int(geo_pend["Cliente"].nunique())
+    st.warning(
+        f"Atenção cadastral: {qtd_geo} cliente(s) estão sem UF e/ou cidade/localização. "
+        "Revise o arquivo de cadastro de clientes para completar esses dados."
+    )
+    with st.expander("Ver clientes com UF/cidade não encontrada"):
+        geo_show = geo_pend.copy()
+        geo_show["UF"] = geo_show["UF"].replace("", "NÃO INFORMADO")
+        geo_show["LOCALIZAÇÃO"] = geo_show["LOCALIZAÇÃO"].replace("", "NÃO INFORMADO")
+        geo_show["FATURAMENTO"] = geo_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+        st.dataframe(geo_show, use_container_width=True, hide_index=True)
 
 # =============================
 # FILTROS (ANO + PERÍODO)
@@ -1226,13 +1332,13 @@ st.divider()
 # =============================
 # 9) PRODUTOS (BASE DE PRODUTOS)
 # =============================
-st.header("Produtos (Base de Produtos)")
+st.header("Produtos")
 
 required_prod = ["Produto", "Quantidade", "MÊS", "ANO", "Valor total", "Custo total"]
 missing_prod = [c for c in required_prod if c not in df_p.columns]
 if missing_prod:
     st.warning(
-        "Não foi possível montar os indicadores de produtos porque faltam colunas na BASE DE PRODUTOS: "
+        "Não foi possível montar os indicadores de produtos porque faltam colunas na base consolidada de produtos: "
         + ", ".join(missing_prod)
         + "\n\nConfira se os nomes estão exatamente assim (incluindo acentos) e tente novamente."
     )
