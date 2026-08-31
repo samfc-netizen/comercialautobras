@@ -895,10 +895,17 @@ if arquivos_mensais:
 if arquivos_prod_mensais:
     st.caption("Arquivos mensais de produtos incorporados: " + ", ".join(arquivos_prod_mensais))
 
-# Validação cadastral: sinaliza qualquer cliente sem UF e/ou cidade/localização.
+# Regra especial: vendas do cliente Mercado Livre são pulverizadas em todo o Brasil.
+# Para fins gerenciais, a UF é tratada como "MERCADO LIVRE" e o cliente não entra
+# na pendência cadastral de UF/cidade.
 df["UF"] = df["UF"].fillna("").astype(str).str.strip()
 df["LOCALIZAÇÃO"] = df["LOCALIZAÇÃO"].fillna("").astype(str).str.strip()
-mask_geo_incompleta = (df["UF"] == "") | (df["LOCALIZAÇÃO"] == "")
+mask_mercado_livre = df["Cliente"].apply(normalize_text_key).str.contains(r"\bMERCADO\s+LIVRE\b", regex=True, na=False)
+df.loc[mask_mercado_livre, "UF"] = "MERCADO LIVRE"
+
+# Validação cadastral: sinaliza qualquer cliente sem UF e/ou cidade/localização,
+# exceto Mercado Livre, cuja operação não representa uma praça geográfica única.
+mask_geo_incompleta = ((df["UF"] == "") | (df["LOCALIZAÇÃO"] == "")) & (~mask_mercado_livre)
 if mask_geo_incompleta.any():
     geo_pend = (
         df.loc[mask_geo_incompleta]
