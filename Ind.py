@@ -2,6 +2,7 @@ import re
 import io
 import html
 import unicodedata
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -292,6 +293,14 @@ MESES_LONG = {
     "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12
 }
 
+# A partir de agosto/2026, arquivos mensais no repositório passam a complementar/substituir
+# apenas o mês correspondente da base histórica. Exemplos: AGOSTO 2026.xlsx, SETEMBRO 2026.xlsx.
+INICIO_ARQUIVOS_MENSAIS = pd.Timestamp(2026, 8, 1)
+MESES_ARQUIVO = {
+    "JANEIRO": 1, "FEVEREIRO": 2, "MARCO": 3, "ABRIL": 4, "MAIO": 5, "JUNHO": 6,
+    "JULHO": 7, "AGOSTO": 8, "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12,
+}
+
 # Faturamento 2024 (fornecido por você) — usado quando o ano anterior não existir na base e for 2024
 FAT_2024_MES = {
     1: 421_375.43,
@@ -414,6 +423,146 @@ def parse_mes_to_num(v):
         return n if 1 <= n <= 12 else None
 
     return None
+
+
+def normalize_text_key(v) -> str:
+    """Normaliza textos para cruzamentos robustos (cliente, arquivo, categoria etc.)."""
+    if v is None or pd.isna(v):
+        return ""
+    s = unicodedata.normalize("NFKD", str(v))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.upper().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def classificar_cliente(v) -> str:
+    """Converte classificação vazia/tracejada em SEM CLASSIFICAÇÃO."""
+    s = "" if v is None or pd.isna(v) else str(v).strip()
+    if not s or re.fullmatch(r"[-–—_\s]+", s):
+        return "SEM CLASSIFICAÇÃO"
+    return s
+
+
+def localizar_arquivo_cadastro_clientes(pasta: Path) -> Path | None:
+    """Localiza cadastro externo de clientes no repositório, sem depender de caixa/acentos."""
+    candidatos = []
+    for arq in pasta.glob("*.xlsx"):
+        stem = normalize_text_key(arq.stem)
+        if (("CADASTRO" in stem and "CLIENT" in stem) or ("RELATORIO" in stem and "CLIENT" in stem)):
+            candidatos.append(arq)
+    return sorted(candidatos, key=lambda x: x.name)[0] if candidatos else None
+
+
+def carregar_cadastro_clientes_externo(pasta: Path) -> pd.DataFrame:
+    """Lê o cadastro externo. Aceita arquivo CADASTRO DE CLIENTES.xlsx ou equivalente."""
+    arq = localizar_arquivo_cadastro_clientes(pasta)
+    if arq is None:
+        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"])
+
+    # O relatório exportado possui uma linha de título antes do cabeçalho real.
+    tentativas = [1, 0]
+    d = None
+    for header in tentativas:
+        try:
+            teste = pd.read_excel(arq, header=header)
+            teste.columns = [normalize_col(c) for c in teste.columns]
+            if "Nome/Razão social" in teste.columns or "Nome/Razao social" in teste.columns:
+                d = teste
+                break
+        except Exception:
+            pass
+    if d is None:
+        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"])
+
+    nome_col = "Nome/Razão social" if "Nome/Razão social" in d.columns else "Nome/Razao social"
+    rename = {
+        nome_col: "Cliente",
+        "Estado": "UF_CAD",
+        "Cidade": "LOCALIZACAO_CAD",
+        "Bairro": "BAIRRO_CAD",
+        "CATEGORIA": "CLASSIFICACAO_CAD",
+    }
+    for origem in list(rename):
+        if origem not in d.columns:
+            d[origem] = ""
+    d = d.rename(columns=rename)
+    d["CLIENTE_KEY"] = d["Cliente"].apply(normalize_text_key)
+    for c in ["UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD"]:
+        d[c] = d[c].fillna("").astype(str).str.strip()
+        d.loc[d[c].apply(lambda x: bool(re.fullmatch(r"[-–—_\s]+", x)) if x else False), c] = ""
+    d["CLASSIFICACAO_CAD"] = d["CLASSIFICACAO_CAD"].apply(classificar_cliente)
+    return (
+        d[d["CLIENTE_KEY"] != ""]
+        .drop_duplicates(subset=["CLIENTE_KEY"], keep="first")
+        [["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"]]
+    )
+
+
+def identificar_mes_ano_arquivo(nome: str):
+    """Retorna (ano, mês) para nomes como AGOSTO 2026.xlsx; caso contrário, None."""
+    stem = normalize_text_key(Path(nome).stem)
+    m = re.fullmatch(r"(JANEIRO|FEVEREIRO|MARCO|ABRIL|MAIO|JUNHO|JULHO|AGOSTO|SETEMBRO|OUTUBRO|NOVEMBRO|DEZEMBRO)\s+(20\d{2})", stem)
+    if not m:
+        return None
+    mes = MESES_ARQUIVO[m.group(1)]
+    ano = int(m.group(2))
+    if pd.Timestamp(ano, mes, 1) < INICIO_ARQUIVOS_MENSAIS:
+        return None
+    return ano, mes
+
+
+def carregar_vendas_mensais(pasta: Path, cadastro: pd.DataFrame):
+    """Carrega automaticamente todos os arquivos mensais válidos do repositório."""
+    frames = []
+    meses_importados = set()
+    arquivos_lidos = []
+
+    for arq in sorted(pasta.glob("*.xlsx")):
+        periodo = identificar_mes_ano_arquivo(arq.name)
+        if not periodo:
+            continue
+        ano_nome, mes_nome = periodo
+        try:
+            d = pd.read_excel(arq, header=1)
+            d.columns = [normalize_col(c) for c in d.columns]
+        except Exception:
+            continue
+
+        obrig = ["Cliente", "Data", "Valor custo", "Valor"]
+        if any(c not in d.columns for c in obrig):
+            continue
+
+        # Mantém apenas linhas efetivamente comerciais; rodapés/totais não possuem cliente/data.
+        d["DATA2"] = safe_to_datetime(d["Data"])
+        d = d[d["Cliente"].notna() & d["DATA2"].notna()].copy()
+        # O relatório inclui no total as linhas comerciais com cliente/data, independentemente da Situação.
+        # Assim o dashboard reconcilia com o Valor total exibido no rodapé do próprio relatório.
+
+        # Segurança: o conteúdo precisa pertencer ao mesmo mês/ano informado no nome do arquivo.
+        d = d[(d["DATA2"].dt.year == ano_nome) & (d["DATA2"].dt.month == mes_nome)].copy()
+        if d.empty:
+            continue
+
+        d["Valor total"] = d["Valor"].apply(parse_brl_number)
+        d["Valor custo"] = d["Valor custo"].apply(parse_brl_number)
+        d["Cliente"] = d["Cliente"].fillna("").astype(str).str.strip()
+        d["CLIENTE_KEY"] = d["Cliente"].apply(normalize_text_key)
+
+        d = d.merge(cadastro, on="CLIENTE_KEY", how="left")
+        d["UF"] = d["UF_CAD"].fillna("").astype(str).str.strip()
+        d["LOCALIZAÇÃO"] = d["LOCALIZACAO_CAD"].fillna("").astype(str).str.strip()
+        d["BAIRRO"] = d["BAIRRO_CAD"].fillna("").astype(str).str.strip()
+        d["CLASSIFICAÇÃO"] = d["CLASSIFICACAO_CAD"].apply(classificar_cliente)
+
+        manter = ["DATA2", "Valor total", "Valor custo", "Cliente", "UF", "LOCALIZAÇÃO", "BAIRRO", "CLASSIFICAÇÃO"]
+        frames.append(d[manter].copy())
+        meses_importados.add((ano_nome, mes_nome))
+        arquivos_lidos.append(arq.name)
+
+    if not frames:
+        return pd.DataFrame(), set(), []
+    return pd.concat(frames, ignore_index=True), meses_importados, arquivos_lidos
 
 
 def abc_classification(df_in: pd.DataFrame, value_col: str, label_col: str = "Produto") -> pd.DataFrame:
@@ -621,29 +770,47 @@ if missing:
     )
     st.stop()
 
-df = df_v.copy()
-
-df["DATA2"] = safe_to_datetime(df["DATA2"])
-df = df[df["DATA2"].notna()].copy()
-
-df["Valor total"] = df["Valor total"].apply(parse_brl_number)
-df["Valor custo"] = df["Valor custo"].apply(parse_brl_number)
-
+# Base histórica existente permanece como fonte principal.
+df_base = df_v.copy()
+df_base["DATA2"] = safe_to_datetime(df_base["DATA2"])
+df_base = df_base[df_base["DATA2"].notna()].copy()
+df_base["Valor total"] = df_base["Valor total"].apply(parse_brl_number)
+df_base["Valor custo"] = df_base["Valor custo"].apply(parse_brl_number)
 for col in ["Cliente", "UF", "LOCALIZAÇÃO", "BAIRRO", "CLASSIFICAÇÃO"]:
-    df[col] = df[col].astype(str).fillna("").str.strip()
+    df_base[col] = df_base[col].fillna("").astype(str).str.strip()
 
-# Remove linhas duplicadas após normalização (evita somas duplicadas no faturamento)
+# Cadastro externo usado para enriquecer as vendas mensais a partir de agosto/2026.
+PASTA_DADOS = Path(".")
+df_cadastro_ext = carregar_cadastro_clientes_externo(PASTA_DADOS)
+df_mensal, meses_mensais, arquivos_mensais = carregar_vendas_mensais(PASTA_DADOS, df_cadastro_ext)
+
+if meses_mensais:
+    # O arquivo mensal é autoritativo somente para seu mês, evitando duplicidade com base.xlsx.
+    chave_base = list(zip(df_base["DATA2"].dt.year, df_base["DATA2"].dt.month))
+    manter_hist = [chave not in meses_mensais for chave in chave_base]
+    df_base = df_base.loc[manter_hist].copy()
+    df = pd.concat([df_base[required_cols], df_mensal[required_cols]], ignore_index=True)
+else:
+    df = df_base[required_cols].copy()
+
+# Remove duplicidades exatas depois da consolidação.
 df = df.drop_duplicates()
 
 df["ANO"] = df["DATA2"].dt.year
 df["MES_NUM"] = df["DATA2"].dt.month
 df["MES"] = df["MES_NUM"].apply(lambda m: MESES_PT[m - 1])
 
+# Margem sempre calculada pelo código, inclusive nos arquivos mensais.
 df["MARGEM_BRUTA_R$"] = df["Valor total"] - df["Valor custo"]
 df["MARGEM_BRUTA_%"] = df.apply(
     lambda r: (r["MARGEM_BRUTA_R$"] / r["Valor total"]) if r["Valor total"] else 0.0,
     axis=1
 )
+
+if arquivos_mensais:
+    st.caption("Arquivos mensais incorporados: " + ", ".join(arquivos_mensais))
+    if df_cadastro_ext.empty:
+        st.warning("Arquivos mensais encontrados, mas o arquivo CADASTRO DE CLIENTES.xlsx não foi localizado. Cidade, bairro, UF e classificação podem ficar sem preenchimento nas vendas novas.")
 
 # =============================
 # FILTROS (ANO + PERÍODO)
