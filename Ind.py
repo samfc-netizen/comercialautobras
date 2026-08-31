@@ -458,7 +458,7 @@ def carregar_cadastro_clientes_externo(pasta: Path) -> pd.DataFrame:
     """Lê o cadastro externo. Aceita arquivo CADASTRO DE CLIENTES.xlsx ou equivalente."""
     arq = localizar_arquivo_cadastro_clientes(pasta)
     if arq is None:
-        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"])
+        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD", "ORIGEM_MATCH"])
 
     # O relatório exportado possui uma linha de título antes do cabeçalho real.
     tentativas = [1, 0]
@@ -473,30 +473,62 @@ def carregar_cadastro_clientes_externo(pasta: Path) -> pd.DataFrame:
         except Exception:
             pass
     if d is None:
-        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"])
+        return pd.DataFrame(columns=["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD", "ORIGEM_MATCH"])
 
     nome_col = "Nome/Razão social" if "Nome/Razão social" in d.columns else "Nome/Razao social"
-    rename = {
-        nome_col: "Cliente",
-        "Estado": "UF_CAD",
-        "Cidade": "LOCALIZACAO_CAD",
-        "Bairro": "BAIRRO_CAD",
-        "CATEGORIA": "CLASSIFICACAO_CAD",
-    }
-    for origem in list(rename):
+    fantasia_col = None
+    for candidato in ["Nome/Nome Fantasia", "Nome Fantasia", "Nome fantasia"]:
+        if candidato in d.columns:
+            fantasia_col = candidato
+            break
+
+    # Mantém os dois identificadores do cadastro. A Razão Social é sempre a chave prioritária;
+    # o Nome Fantasia funciona somente como fallback quando a venda não encontra a Razão Social.
+    for origem in [nome_col, "Estado", "Cidade", "Bairro", "CATEGORIA"]:
         if origem not in d.columns:
             d[origem] = ""
-    d = d.rename(columns=rename)
-    d["CLIENTE_KEY"] = d["Cliente"].apply(normalize_text_key)
+    if fantasia_col is None:
+        fantasia_col = "__NOME_FANTASIA__"
+        d[fantasia_col] = ""
+
+    cad = pd.DataFrame({
+        "RAZAO_SOCIAL": d[nome_col],
+        "NOME_FANTASIA": d[fantasia_col],
+        "UF_CAD": d["Estado"],
+        "LOCALIZACAO_CAD": d["Cidade"],
+        "BAIRRO_CAD": d["Bairro"],
+        "CLASSIFICACAO_CAD": d["CATEGORIA"],
+    })
+
     for c in ["UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD"]:
-        d[c] = d[c].fillna("").astype(str).str.strip()
-        d.loc[d[c].apply(lambda x: bool(re.fullmatch(r"[-–—_\s]+", x)) if x else False), c] = ""
-    d["CLASSIFICACAO_CAD"] = d["CLASSIFICACAO_CAD"].apply(classificar_cliente)
-    return (
-        d[d["CLIENTE_KEY"] != ""]
+        cad[c] = cad[c].fillna("").astype(str).str.strip()
+        cad.loc[cad[c].apply(lambda x: bool(re.fullmatch(r"[-–—_\s]+", x)) if x else False), c] = ""
+    cad["CLASSIFICACAO_CAD"] = cad["CLASSIFICACAO_CAD"].apply(classificar_cliente)
+
+    # Cria um índice único de aliases. Razão Social recebe prioridade 0 e Nome Fantasia prioridade 1.
+    # Assim, se um texto existir simultaneamente como razão social e fantasia de cadastros distintos,
+    # prevalece a correspondência exata pela Razão Social.
+    razao = cad[["RAZAO_SOCIAL", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"]].copy()
+    razao["CLIENTE_KEY"] = razao["RAZAO_SOCIAL"].apply(normalize_text_key)
+    razao["ORIGEM_MATCH"] = "RAZÃO SOCIAL"
+    razao["PRIORIDADE_MATCH"] = 0
+
+    fantasia = cad[["NOME_FANTASIA", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"]].copy()
+    fantasia["CLIENTE_KEY"] = fantasia["NOME_FANTASIA"].apply(normalize_text_key)
+    fantasia["ORIGEM_MATCH"] = "NOME FANTASIA"
+    fantasia["PRIORIDADE_MATCH"] = 1
+
+    aliases = pd.concat([
+        razao[["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD", "ORIGEM_MATCH", "PRIORIDADE_MATCH"]],
+        fantasia[["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD", "ORIGEM_MATCH", "PRIORIDADE_MATCH"]],
+    ], ignore_index=True)
+
+    aliases = (
+        aliases[aliases["CLIENTE_KEY"] != ""]
+        .sort_values(["PRIORIDADE_MATCH"], kind="stable")
         .drop_duplicates(subset=["CLIENTE_KEY"], keep="first")
-        [["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD"]]
     )
+    return aliases[["CLIENTE_KEY", "UF_CAD", "LOCALIZACAO_CAD", "BAIRRO_CAD", "CLASSIFICACAO_CAD", "ORIGEM_MATCH"]]
 
 
 def identificar_mes_ano_arquivo(nome: str):
@@ -550,12 +582,13 @@ def carregar_vendas_mensais(pasta: Path, cadastro: pd.DataFrame):
         d["CLIENTE_KEY"] = d["Cliente"].apply(normalize_text_key)
 
         d = d.merge(cadastro, on="CLIENTE_KEY", how="left")
+        d["CADASTRO_ENCONTRADO"] = d["ORIGEM_MATCH"].notna()
         d["UF"] = d["UF_CAD"].fillna("").astype(str).str.strip()
         d["LOCALIZAÇÃO"] = d["LOCALIZACAO_CAD"].fillna("").astype(str).str.strip()
         d["BAIRRO"] = d["BAIRRO_CAD"].fillna("").astype(str).str.strip()
         d["CLASSIFICAÇÃO"] = d["CLASSIFICACAO_CAD"].apply(classificar_cliente)
 
-        manter = ["DATA2", "Valor total", "Valor custo", "Cliente", "UF", "LOCALIZAÇÃO", "BAIRRO", "CLASSIFICAÇÃO"]
+        manter = ["DATA2", "Valor total", "Valor custo", "Cliente", "UF", "LOCALIZAÇÃO", "BAIRRO", "CLASSIFICAÇÃO", "CADASTRO_ENCONTRADO"]
         frames.append(d[manter].copy())
         meses_importados.add((ano_nome, mes_nome))
         arquivos_lidos.append(arq.name)
@@ -887,6 +920,18 @@ df["MARGEM_BRUTA_%"] = df.apply(
     axis=1
 )
 
+# Clientes das vendas mensais que não foram localizados nem por Razão Social nem por Nome Fantasia.
+clientes_sem_cadastro = pd.DataFrame()
+if not df_mensal.empty and "CADASTRO_ENCONTRADO" in df_mensal.columns:
+    mask_sem_cad = ~df_mensal["CADASTRO_ENCONTRADO"].fillna(False)
+    if mask_sem_cad.any():
+        clientes_sem_cadastro = (
+            df_mensal.loc[mask_sem_cad]
+            .groupby("Cliente", as_index=False)
+            .agg(FATURAMENTO=("Valor total", "sum"))
+            .sort_values("FATURAMENTO", ascending=False)
+        )
+
 if arquivos_mensais:
     st.caption("Arquivos mensais de vendas incorporados: " + ", ".join(arquivos_mensais))
     if df_cadastro_ext.empty:
@@ -894,6 +939,19 @@ if arquivos_mensais:
 
 if arquivos_prod_mensais:
     st.caption("Arquivos mensais de produtos incorporados: " + ", ".join(arquivos_prod_mensais))
+
+if not clientes_sem_cadastro.empty:
+    mask_ml_pend = clientes_sem_cadastro["Cliente"].apply(normalize_text_key).str.contains(r"\bMERCADO\s+LIVRE\b", regex=True, na=False)
+    cad_nao_localizado = clientes_sem_cadastro.loc[~mask_ml_pend].copy()
+    if not cad_nao_localizado.empty:
+        st.warning(
+            f"Atenção cadastral: {cad_nao_localizado['Cliente'].nunique()} cliente(s) das vendas mensais "
+            "não foram encontrados no CADASTRO DE CLIENTES nem por Razão Social nem por Nome Fantasia."
+        )
+        with st.expander("Ver clientes não encontrados no cadastro"):
+            cad_show = cad_nao_localizado.copy()
+            cad_show["FATURAMENTO"] = cad_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+            st.dataframe(cad_show, use_container_width=True, hide_index=True)
 
 # Regra especial: vendas do cliente Mercado Livre são pulverizadas em todo o Brasil.
 # Para fins gerenciais, a UF é tratada como "MERCADO LIVRE" e o cliente não entra
