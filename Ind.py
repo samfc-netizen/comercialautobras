@@ -1242,10 +1242,26 @@ if ufs_fora_mapa:
     st.caption("UFs não posicionadas no mapa: " + ", ".join(ufs_fora_mapa))
 
 # -----------------------------
-# DRILL GEOGRÁFICO: UF > CIDADE > BAIRRO
+# DRILL GEOGRÁFICO: DF > REGIÃO/BAIRRO | DEMAIS UFs > CIDADE > BAIRRO
 # -----------------------------
-st.markdown("#### Drill geográfico — UF → Cidade → Bairro")
-st.caption("Selecione uma UF para abrir as cidades. Depois selecione uma cidade para detalhar os bairros.")
+st.markdown("#### Drill geográfico — UF → Cidade/Região → Bairro")
+st.caption("No Distrito Federal, o primeiro detalhamento usa bairros/regiões e consolida variações como Ceilândia Norte/Sul em Ceilândia. Nas demais UFs, o primeiro nível é Cidade.")
+
+def normalizar_local_geo(v, consolidar_df=False):
+    """Normaliza nomes geográficos e, no DF, consolida subdivisões Norte/Sul/Leste/Oeste."""
+    if v is None or pd.isna(v):
+        return "NÃO INFORMADO"
+    original = re.sub(r"\s+", " ", str(v).strip())
+    if not original or re.fullmatch(r"[-–—_\s]+", original):
+        return "NÃO INFORMADO"
+    chave = normalize_text_key(original)
+    # Remove ruído comum de grafia para o agrupamento.
+    chave = re.sub(r"\s+", " ", chave).strip()
+    if consolidar_df:
+        # Ex.: CEILANDIA NORTE / CEILANDIA SUL -> CEILANDIA.
+        chave = re.sub(r"\s+(NORTE|SUL|LESTE|OESTE)$", "", chave).strip()
+    # Exibição padronizada, preservando siglas usuais.
+    return chave.title()
 
 geo_base = df_f.copy()
 for c in ["UF", "LOCALIZAÇÃO", "BAIRRO"]:
@@ -1261,56 +1277,67 @@ if geo_uf_sel != "(Selecione)":
     geo_uf = geo_base[geo_base["UF"] == geo_uf_sel].copy()
     fat_geo_uf = float(geo_uf["Valor total"].sum())
     fat_geo_geral = float(geo_base["Valor total"].sum())
+    eh_df = geo_uf_sel == "DF"
 
-    cidades = (
-        geo_uf.assign(CIDADE=geo_uf["LOCALIZAÇÃO"].replace("", "NÃO INFORMADO"))
-        .groupby("CIDADE", as_index=False)["Valor total"].sum()
-        .rename(columns={"Valor total": "FATURAMENTO"})
+    if eh_df:
+        # No DF, BAIRRO é o nível gerencial principal. Norte/Sul etc. são consolidados.
+        geo_uf["NIVEL_GEO"] = geo_uf["BAIRRO"].apply(lambda x: normalizar_local_geo(x, consolidar_df=True))
+        rotulo_nivel = "Região/Bairro"
+        rotulo_plural = "Regiões/Bairros"
+    else:
+        # Demais UFs: Cidade, consolidando diferenças de acento, caixa e espaços.
+        geo_uf["NIVEL_GEO"] = geo_uf["LOCALIZAÇÃO"].apply(normalizar_local_geo)
+        rotulo_nivel = "Cidade"
+        rotulo_plural = "Cidades"
+
+    locais = (
+        geo_uf.groupby("NIVEL_GEO", as_index=False)["Valor total"].sum()
+        .rename(columns={"NIVEL_GEO": rotulo_nivel.upper(), "Valor total": "FATURAMENTO"})
         .sort_values("FATURAMENTO", ascending=False)
     )
-    cidades["% DA UF"] = cidades["FATURAMENTO"].apply(lambda x: x / fat_geo_uf if fat_geo_uf else 0.0)
-    cidades["% DO GERAL"] = cidades["FATURAMENTO"].apply(lambda x: x / fat_geo_geral if fat_geo_geral else 0.0)
+    locais["% DA UF"] = locais["FATURAMENTO"].apply(lambda x: x / fat_geo_uf if fat_geo_uf else 0.0)
+    locais["% DO GERAL"] = locais["FATURAMENTO"].apply(lambda x: x / fat_geo_geral if fat_geo_geral else 0.0)
 
     with geo_col2:
-        cidade_sel = st.selectbox("Cidade para detalhar", ["(Todas)"] + cidades["CIDADE"].tolist(), key="geo_cidade_drill")
+        local_sel = st.selectbox(
+            f"{rotulo_nivel} para detalhar",
+            ["(Todas)"] + locais[rotulo_nivel.upper()].tolist(),
+            key="geo_cidade_drill"
+        )
 
     gm1, gm2, gm3 = st.columns(3)
     gm1.metric(f"Faturamento {geo_uf_sel}", f"R$ {format_brl(fat_geo_uf)}")
     gm2.metric("Participação no Geral", pct_br(fat_geo_uf / fat_geo_geral if fat_geo_geral else 0.0))
-    gm3.metric("Cidades com faturamento", f"{len(cidades):,}".replace(",", "."))
+    gm3.metric(f"{rotulo_plural} com faturamento", f"{len(locais):,}".replace(",", "."))
 
-    # Gráfico das cidades — limita visualmente às 15 maiores, mantendo a tabela completa.
-    cidades_plot = cidades.head(15).sort_values("FATURAMENTO", ascending=True)
-    fig_cidades = px.bar(
-        cidades_plot, x="FATURAMENTO", y="CIDADE", orientation="h",
-        title=f"Top cidades de {geo_uf_sel} por faturamento",
+    locais_plot = locais.head(15).sort_values("FATURAMENTO", ascending=True)
+    fig_locais = px.bar(
+        locais_plot, x="FATURAMENTO", y=rotulo_nivel.upper(), orientation="h",
+        title=f"Top {rotulo_plural.lower()} de {geo_uf_sel} por faturamento",
         text="FATURAMENTO"
     )
-    fig_cidades.update_traces(
+    fig_locais.update_traces(
         texttemplate="R$ %{text:,.0f}", textposition="outside",
         hovertemplate="<b>%{y}</b><br>Faturamento: R$ %{x:,.2f}<extra></extra>"
     )
-    fig_cidades.update_layout(height=max(380, 30 * len(cidades_plot) + 100), xaxis_title="Faturamento", yaxis_title="")
-    st.plotly_chart(fig_cidades, use_container_width=True)
+    fig_locais.update_layout(height=max(380, 30 * len(locais_plot) + 100), xaxis_title="Faturamento", yaxis_title="")
+    st.plotly_chart(fig_locais, use_container_width=True)
 
-    cidades_show = cidades.copy()
-    cidades_show["FATURAMENTO"] = cidades_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
-    cidades_show["% DA UF"] = cidades_show["% DA UF"].apply(pct_br)
-    cidades_show["% DO GERAL"] = cidades_show["% DO GERAL"].apply(pct_br)
-    st.dataframe(cidades_show, use_container_width=True, hide_index=True)
+    locais_show = locais.copy()
+    locais_show["FATURAMENTO"] = locais_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+    locais_show["% DA UF"] = locais_show["% DA UF"].apply(pct_br)
+    locais_show["% DO GERAL"] = locais_show["% DO GERAL"].apply(pct_br)
+    st.dataframe(locais_show, use_container_width=True, hide_index=True)
 
-    if cidade_sel != "(Todas)":
-        st.markdown(f"##### Bairros — {cidade_sel} / {geo_uf_sel}")
-        if cidade_sel == "NÃO INFORMADO":
-            geo_cidade = geo_uf[geo_uf["LOCALIZAÇÃO"] == ""].copy()
-        else:
-            geo_cidade = geo_uf[geo_uf["LOCALIZAÇÃO"] == cidade_sel].copy()
-
+    # Nas demais UFs, mantém o segundo nível por Bairro. No DF, o bairro/região já é o nível principal.
+    if (not eh_df) and local_sel != "(Todas)":
+        st.markdown(f"##### Bairros — {local_sel} / {geo_uf_sel}")
+        geo_cidade = geo_uf[geo_uf["NIVEL_GEO"] == local_sel].copy()
         fat_geo_cidade = float(geo_cidade["Valor total"].sum())
+        geo_cidade["BAIRRO_NORM"] = geo_cidade["BAIRRO"].apply(normalizar_local_geo)
         bairros = (
-            geo_cidade.assign(BAIRRO_DRILL=geo_cidade["BAIRRO"].replace("", "NÃO INFORMADO"))
-            .groupby("BAIRRO_DRILL", as_index=False)["Valor total"].sum()
-            .rename(columns={"BAIRRO_DRILL": "BAIRRO", "Valor total": "FATURAMENTO"})
+            geo_cidade.groupby("BAIRRO_NORM", as_index=False)["Valor total"].sum()
+            .rename(columns={"BAIRRO_NORM": "BAIRRO", "Valor total": "FATURAMENTO"})
             .sort_values("FATURAMENTO", ascending=False)
         )
         bairros["% DA CIDADE"] = bairros["FATURAMENTO"].apply(lambda x: x / fat_geo_cidade if fat_geo_cidade else 0.0)
@@ -1318,15 +1345,14 @@ if geo_uf_sel != "(Selecione)":
         bairros["% DO GERAL"] = bairros["FATURAMENTO"].apply(lambda x: x / fat_geo_geral if fat_geo_geral else 0.0)
 
         bm1, bm2, bm3 = st.columns(3)
-        bm1.metric(f"Faturamento {cidade_sel}", f"R$ {format_brl(fat_geo_cidade)}")
+        bm1.metric(f"Faturamento {local_sel}", f"R$ {format_brl(fat_geo_cidade)}")
         bm2.metric(f"Participação em {geo_uf_sel}", pct_br(fat_geo_cidade / fat_geo_uf if fat_geo_uf else 0.0))
         bm3.metric("Bairros com faturamento", f"{len(bairros):,}".replace(",", "."))
 
         bairros_plot = bairros.head(15).sort_values("FATURAMENTO", ascending=True)
         fig_bairros = px.bar(
             bairros_plot, x="FATURAMENTO", y="BAIRRO", orientation="h",
-            title=f"Top bairros de {cidade_sel} por faturamento",
-            text="FATURAMENTO"
+            title=f"Top bairros de {local_sel} por faturamento", text="FATURAMENTO"
         )
         fig_bairros.update_traces(
             texttemplate="R$ %{text:,.0f}", textposition="outside",
@@ -1341,8 +1367,14 @@ if geo_uf_sel != "(Selecione)":
         bairros_show["% DA UF"] = bairros_show["% DA UF"].apply(pct_br)
         bairros_show["% DO GERAL"] = bairros_show["% DO GERAL"].apply(pct_br)
         st.dataframe(bairros_show, use_container_width=True, hide_index=True)
+    elif eh_df and local_sel != "(Todas)":
+        geo_local = geo_uf[geo_uf["NIVEL_GEO"] == local_sel].copy()
+        fat_local = float(geo_local["Valor total"].sum())
+        lm1, lm2 = st.columns(2)
+        lm1.metric(f"Faturamento {local_sel}", f"R$ {format_brl(fat_local)}")
+        lm2.metric("Participação no DF", pct_br(fat_local / fat_geo_uf if fat_geo_uf else 0.0))
 else:
-    st.info("Selecione uma UF para abrir o detalhamento por cidade e bairro.")
+    st.info("Selecione uma UF. No DF o detalhamento será por bairro/região; nas demais UFs, por cidade.")
 
 st.divider()
 
