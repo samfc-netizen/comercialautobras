@@ -1247,21 +1247,50 @@ if ufs_fora_mapa:
 st.markdown("#### Drill geográfico — UF → Cidade/Região → Bairro")
 st.caption("No Distrito Federal, o primeiro detalhamento usa bairros/regiões e consolida variações como Ceilândia Norte/Sul em Ceilândia. Nas demais UFs, o primeiro nível é Cidade.")
 
+UFS_BR = {
+    "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS",
+    "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC",
+    "SP", "SE", "TO"
+}
+
+NOMES_UF_BR = {
+    "ACRE", "ALAGOAS", "AMAPA", "AMAZONAS", "BAHIA", "CEARA", "DISTRITO FEDERAL",
+    "ESPIRITO SANTO", "GOIAS", "MARANHAO", "MATO GROSSO", "MATO GROSSO DO SUL",
+    "MINAS GERAIS", "PARA", "PARAIBA", "PARANA", "PERNAMBUCO", "PIAUI",
+    "RIO DE JANEIRO", "RIO GRANDE DO NORTE", "RIO GRANDE DO SUL", "RONDONIA", "RORAIMA",
+    "SANTA CATARINA", "SAO PAULO", "SERGIPE", "TOCANTINS"
+}
+
 def normalizar_local_geo(v, consolidar_df=False):
-    """Normaliza nomes geográficos e, no DF, consolida subdivisões Norte/Sul/Leste/Oeste."""
+    """
+    Cria uma chave geográfica única para TODO o Brasil.
+    Consolida acentos/caixa/espaços e remove UF/estado anexado ao final do nome.
+    Exemplos: GOIANIA, GOIANIA-GO, GOIANIA/GO e GOIANIA, GO -> Goiania.
+    No DF, também consolida subdivisões direcionais, como Ceilandia Norte/Sul -> Ceilandia.
+    """
     if v is None or pd.isna(v):
         return "NÃO INFORMADO"
     original = re.sub(r"\s+", " ", str(v).strip())
     if not original or re.fullmatch(r"[-–—_\s]+", original):
         return "NÃO INFORMADO"
+
     chave = normalize_text_key(original)
-    # Remove ruído comum de grafia para o agrupamento.
     chave = re.sub(r"\s+", " ", chave).strip()
+
+    # Remove sufixos de UF em qualquer formato comum: Cidade,GO | Cidade-GO | Cidade/GO | Cidade GO.
+    siglas = "|".join(sorted(UFS_BR))
+    chave = re.sub(rf"\s*[,;/\-]\s*(?:{siglas})\s*$", "", chave).strip()
+    chave = re.sub(rf"\s+(?:{siglas})\s*$", "", chave).strip()
+
+    # Remove também o nome completo do estado quando anexado ao fim: Cidade, Goiás etc.
+    for nome_estado in sorted(NOMES_UF_BR, key=len, reverse=True):
+        chave = re.sub(rf"\s*[,;/\-]\s*{re.escape(nome_estado)}\s*$", "", chave).strip()
+
     if consolidar_df:
         # Ex.: CEILANDIA NORTE / CEILANDIA SUL -> CEILANDIA.
         chave = re.sub(r"\s+(NORTE|SUL|LESTE|OESTE)$", "", chave).strip()
-    # Exibição padronizada, preservando siglas usuais.
-    return chave.title()
+
+    return chave.title() if chave else "NÃO INFORMADO"
 
 geo_base = df_f.copy()
 for c in ["UF", "LOCALIZAÇÃO", "BAIRRO"]:
