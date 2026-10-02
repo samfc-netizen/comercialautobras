@@ -1233,7 +1233,7 @@ fig_brasil.update_geos(
 )
 fig_brasil.update_layout(
     height=690, margin=dict(l=0, r=0, t=20, b=0),
-    title="Faturamento por UF — rótulos reposicionados para melhorar a leitura"
+    title="Faturamento por UF"
 )
 st.plotly_chart(fig_brasil, use_container_width=True)
 
@@ -1402,6 +1402,55 @@ if geo_uf_sel != "(Selecione)":
         lm1, lm2 = st.columns(2)
         lm1.metric(f"Faturamento {local_sel}", f"R$ {format_brl(fat_local)}")
         lm2.metric("Participação no DF", pct_br(fat_local / fat_geo_uf if fat_geo_uf else 0.0))
+
+    # Clientes da cidade/região selecionada. No DF, NIVEL_GEO representa Região/Bairro;
+    # nas demais UFs, representa Cidade. O faturamento é consolidado por cliente.
+    if local_sel != "(Todas)":
+        geo_clientes = geo_uf[geo_uf["NIVEL_GEO"] == local_sel].copy()
+        fat_regiao_sel = float(geo_clientes["Valor total"].sum())
+
+        clientes_regiao = (
+            geo_clientes.groupby("Cliente", as_index=False)
+            .agg(
+                FATURAMENTO=("Valor total", "sum"),
+                VALOR_CUSTO=("Valor custo", "sum"),
+            )
+            .sort_values("FATURAMENTO", ascending=False)
+        )
+        clientes_regiao["MARGEM_BRUTA_R$"] = clientes_regiao["FATURAMENTO"] - clientes_regiao["VALOR_CUSTO"]
+        clientes_regiao["MARGEM_BRUTA_%"] = clientes_regiao.apply(
+            lambda r: (r["MARGEM_BRUTA_R$"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1
+        )
+        clientes_regiao["% DA REGIÃO"] = clientes_regiao["FATURAMENTO"].apply(
+            lambda x: x / fat_regiao_sel if fat_regiao_sel else 0.0
+        )
+        clientes_regiao["% DA UF"] = clientes_regiao["FATURAMENTO"].apply(
+            lambda x: x / fat_geo_uf if fat_geo_uf else 0.0
+        )
+        clientes_regiao["% DO GERAL"] = clientes_regiao["FATURAMENTO"].apply(
+            lambda x: x / fat_geo_geral if fat_geo_geral else 0.0
+        )
+
+        st.markdown(f"##### Clientes — {local_sel} / {geo_uf_sel}")
+        cm1, cm2, cm3 = st.columns(3)
+        cm1.metric("Clientes com faturamento", f"{clientes_regiao['Cliente'].nunique():,}".replace(",", "."))
+        cm2.metric("Faturamento da região", f"R$ {format_brl(fat_regiao_sel)}")
+        cm3.metric("Participação no Geral", pct_br(fat_regiao_sel / fat_geo_geral if fat_geo_geral else 0.0))
+
+        clientes_show = clientes_regiao[[
+            "Cliente", "FATURAMENTO", "MARGEM_BRUTA_R$", "MARGEM_BRUTA_%",
+            "% DA REGIÃO", "% DA UF", "% DO GERAL"
+        ]].copy()
+        clientes_show["FATURAMENTO"] = clientes_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+        clientes_show["MARGEM_BRUTA_R$"] = clientes_show["MARGEM_BRUTA_R$"].apply(lambda x: f"R$ {format_brl(x)}")
+        for col_pct in ["MARGEM_BRUTA_%", "% DA REGIÃO", "% DA UF", "% DO GERAL"]:
+            clientes_show[col_pct] = clientes_show[col_pct].apply(pct_br)
+        st.dataframe(clientes_show, use_container_width=True, hide_index=True)
+        botao_download_pdf(
+            clientes_show,
+            f"Clientes - {local_sel} - {geo_uf_sel}",
+            f"clientes_{normalize_text_key(local_sel).lower().replace(' ', '_')}_{geo_uf_sel.lower()}.pdf"
+        )
 else:
     st.info("Selecione uma UF. No DF o detalhamento será por bairro/região; nas demais UFs, por cidade.")
 
