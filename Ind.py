@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Dashboard Comercial Autobrás", layout="wide")
 
@@ -183,62 +184,6 @@ div.stDownloadButton > button p {
     color: #EAF2FF;
 }
 
-.chat-shell {
-    border-radius: 26px;
-    padding: 22px;
-    background: linear-gradient(180deg, #F8FBFF 0%, #EFF6FF 100%);
-    border: 1px solid #DCEBFF;
-    box-shadow: 0 14px 36px rgba(17, 47, 89, .10);
-    margin-bottom: 16px;
-}
-
-.chat-title {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 8px;
-}
-
-.chat-avatar {
-    width: 44px;
-    height: 44px;
-    border-radius: 15px;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(135deg, #0B1F33, #2F80ED);
-    color: white;
-    font-weight: 900;
-}
-
-.chat-title h2 {
-    margin: 0 !important;
-    font-size: 26px;
-    letter-spacing: -0.03em;
-    color: #0B1F33 !important;
-}
-
-.chat-title p {
-    margin: 2px 0 0 0;
-    color: #51657D;
-}
-
-.chat-examples {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 14px;
-}
-
-.chat-chip {
-    border: 1px solid #CDE0F7;
-    background: white;
-    color: #123E68;
-    border-radius: 999px;
-    padding: 8px 12px;
-    font-size: 13px;
-    font-weight: 700;
-}
-
 @media (max-width: 900px) {
     .autobras-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .autobras-hero { padding: 38px 28px; }
@@ -269,7 +214,7 @@ if not st.session_state["autobras_dashboard_started"]:
                 <div class="autobras-card"><strong>Vendas</strong><span>Faturamento, evolução mensal e comparativos por período.</span></div>
                 <div class="autobras-card"><strong>Margem</strong><span>Margem bruta em R$, percentual e análise por cliente, UF e produto.</span></div>
                 <div class="autobras-card"><strong>Clientes</strong><span>Ranking, crescimento, queda, concentração, novos e inativos.</span></div>
-                <div class="autobras-card"><strong>Agente BI</strong><span>Pergunte como em um chat e receba respostas calculadas pela base.</span></div>
+                <div class="autobras-card"><strong>Classificação</strong><span>Analise o mix de clientes e faça drill-down por perfil comercial.</span></div>
             </div>
         </div>
     </div>
@@ -442,6 +387,29 @@ def classificar_cliente(v) -> str:
     if not s or re.fullmatch(r"[-–—_\s]+", s):
         return "SEM CLASSIFICAÇÃO"
     return s
+
+
+def normalizar_classificacao_cliente(v) -> str:
+    """Consolida grafias equivalentes da classificação de clientes."""
+    s_original = classificar_cliente(v)
+    if s_original == "SEM CLASSIFICAÇÃO":
+        return s_original
+
+    chave = normalize_text_key(s_original)
+    chave = re.sub(r"[^A-Z0-9]+", " ", chave)
+    chave = re.sub(r"\s+", " ", chave).strip()
+
+    # Consolida variações de Empresa COM máquina: acento, abreviações e pequenas diferenças de escrita.
+    if re.search(r"\b(COM|C)\b.*\bMAQUINA\b", chave) or re.search(r"\bEMPRESA\b.*\bC\s*MAQUINA\b", chave):
+        return "Empresa com máquina"
+
+    # Consolida variações de Empresa SEM máquina: acento, 's/ máquina' e pequenas diferenças de escrita.
+    if re.search(r"\b(SEM|S)\b.*\bMAQUINA\b", chave) or re.search(r"\bEMPRESA\b.*\bS\s*MAQUINA\b", chave):
+        return "Empresa sem máquina"
+
+    # Para as demais classificações, remove diferenças apenas de caixa/espaçamento/acentuação
+    # usando a primeira grafia padronizada por chave no tratamento posterior.
+    return s_original.strip()
 
 
 def localizar_arquivo_cadastro_clientes(pasta: Path) -> Path | None:
@@ -800,7 +768,7 @@ def botao_download_pdf(df_in: pd.DataFrame, titulo: str, nome_arquivo: str):
 st.markdown("""
 <div class="autobras-topbar">
     <h1>Dashboard Comercial Autobrás</h1>
-    <p>Indicadores comerciais, leitura executiva e agente de perguntas e respostas.</p>
+    <p>Indicadores comerciais, leitura executiva, clientes, regiões e produtos.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -908,6 +876,20 @@ else:
 
 # Remove duplicidades exatas depois da consolidação.
 df = df.drop_duplicates()
+
+# Padroniza classificações equivalentes antes de qualquer indicador do dashboard.
+df["CLASSIFICAÇÃO"] = df["CLASSIFICAÇÃO"].apply(normalizar_classificacao_cliente)
+
+# Consolida também diferenças residuais apenas de acento/caixa/espaçamento nas demais categorias.
+_class_key = df["CLASSIFICAÇÃO"].apply(normalize_text_key)
+_class_canon = (
+    pd.DataFrame({"KEY": _class_key, "VAL": df["CLASSIFICAÇÃO"]})
+    .query("KEY != ''")
+    .drop_duplicates("KEY", keep="first")
+    .set_index("KEY")["VAL"]
+    .to_dict()
+)
+df["CLASSIFICAÇÃO"] = _class_key.map(_class_canon).fillna("SEM CLASSIFICAÇÃO")
 
 df["ANO"] = df["DATA2"].dt.year
 df["MES_NUM"] = df["DATA2"].dt.month
@@ -1163,44 +1145,59 @@ botao_download_pdf(rel_mes_show, "Relação Financeira por Mês", "relacao_finan
 st.divider()
 
 # =============================
-# 3) MAPA (TREEMAP) CONDICIONAL EM 1 GRÁFICO
+# 3) MAPA DO BRASIL POR UF
 # =============================
-st.subheader("Mapa de Vendas (UF → Localização → Bairro no DF | demais: UF → Localização)")
+st.subheader("Mapa do Brasil — Faturamento por UF")
 
-base_map = df_f.copy()
-for c in ["UF", "LOCALIZAÇÃO", "BAIRRO"]:
-    base_map[c] = base_map[c].fillna("").astype(str).str.strip()
-    base_map.loc[base_map[c] == "", c] = "(vazio)"
+# Coordenadas aproximadas dos centroides das UFs para posicionar os valores no mapa.
+UF_COORDS = {
+    "AC": (-8.77, -70.55), "AL": (-9.62, -36.82), "AP": (1.41, -51.77),
+    "AM": (-3.47, -65.10), "BA": (-12.96, -41.70), "CE": (-5.20, -39.53),
+    "DF": (-15.78, -47.93), "ES": (-19.19, -40.34), "GO": (-15.98, -49.86),
+    "MA": (-5.42, -45.44), "MT": (-12.64, -55.42), "MS": (-20.51, -54.54),
+    "MG": (-18.10, -44.38), "PA": (-3.79, -52.48), "PB": (-7.28, -36.72),
+    "PR": (-24.89, -51.55), "PE": (-8.38, -37.86), "PI": (-6.60, -42.28),
+    "RJ": (-22.25, -42.66), "RN": (-5.81, -36.59), "RS": (-30.17, -53.50),
+    "RO": (-10.83, -63.34), "RR": (1.99, -61.33), "SC": (-27.45, -50.95),
+    "SP": (-22.19, -48.79), "SE": (-10.57, -37.45), "TO": (-9.46, -48.26),
+}
 
-base_map["UF_UP"] = base_map["UF"].str.upper()
-base_map["BAIRRO_MAPA"] = base_map.apply(
-    lambda r: r["BAIRRO"] if r["UF_UP"] == "DF" else "— (sem detalhamento)",
-    axis=1
+uf_mapa = (
+    df_f.assign(UF=df_f["UF"].fillna("").astype(str).str.upper().str.strip())
+    .groupby("UF", as_index=False)["Valor total"].sum()
+    .rename(columns={"Valor total": "FATURAMENTO"})
 )
+uf_mapa = uf_mapa[uf_mapa["UF"].isin(UF_COORDS)].copy()
+uf_mapa["LAT"] = uf_mapa["UF"].map(lambda x: UF_COORDS[x][0])
+uf_mapa["LON"] = uf_mapa["UF"].map(lambda x: UF_COORDS[x][1])
+uf_mapa["LABEL"] = uf_mapa.apply(lambda r: f"<b>{r['UF']}</b><br>R$ {format_brl(r['FATURAMENTO'])}", axis=1)
 
-map_agg = (
-    base_map.groupby(["UF", "LOCALIZAÇÃO", "BAIRRO_MAPA"], as_index=False)
-    .agg(FATURAMENTO=("Valor total", "sum"))
+fig_brasil = go.Figure()
+fig_brasil.add_trace(go.Scattergeo(
+    lon=uf_mapa["LON"], lat=uf_mapa["LAT"],
+    text=uf_mapa["LABEL"], mode="markers+text", textposition="top center",
+    customdata=uf_mapa[["UF", "FATURAMENTO"]],
+    marker=dict(
+        size=uf_mapa["FATURAMENTO"].apply(lambda v: 12 + 26 * (v / uf_mapa["FATURAMENTO"].max()) if uf_mapa["FATURAMENTO"].max() else 12),
+        opacity=0.72, line=dict(width=1, color="white")
+    ),
+    hovertemplate="<b>%{customdata[0]}</b><br>Faturamento: R$ %{customdata[1]:,.2f}<extra></extra>"
+))
+fig_brasil.update_geos(
+    scope="south america", projection_type="mercator",
+    lataxis_range=[-35, 6], lonaxis_range=[-75, -32],
+    showland=True, landcolor="#EEF3F8", showcountries=True, countrycolor="#AAB7C4",
+    showcoastlines=True, coastlinecolor="#AAB7C4", bgcolor="rgba(0,0,0,0)"
 )
-
-fig_map = px.treemap(
-    map_agg,
-    path=["UF", "LOCALIZAÇÃO", "BAIRRO_MAPA"],
-    values="FATURAMENTO",
-    title="Interaja no hover: caminho (UF/Localização/Bairro), Faturamento e % do Total (todas as UFs)"
+fig_brasil.update_layout(
+    height=650, margin=dict(l=0, r=0, t=20, b=0),
+    title="Faturamento por UF — valores posicionados geograficamente"
 )
+st.plotly_chart(fig_brasil, use_container_width=True)
 
-fig_map.update_traces(
-    hovertemplate=(
-        "<b>%{label}</b><br>"
-        "Caminho: %{currentPath}<br>"
-        "Faturamento: R$ %{value:,.2f}<br>"
-        "Representatividade (Total): %{percentRoot:.2%}"
-        "<extra></extra>"
-    )
-)
-
-st.plotly_chart(fig_map, use_container_width=True)
+ufs_fora_mapa = sorted(set(uf_mapa["UF"]) - set(UF_COORDS))
+if ufs_fora_mapa:
+    st.caption("UFs não posicionadas no mapa: " + ", ".join(ufs_fora_mapa))
 
 st.divider()
 
@@ -1295,25 +1292,66 @@ else:
 st.divider()
 
 # =============================
-# 6) PIZZA: FATURAMENTO POR CLASSIFICAÇÃO (TIPO DE CLIENTE)
+# 6) FATURAMENTO POR CLASSIFICAÇÃO + DRILL-DOWN
 # =============================
 st.subheader("Faturamento por Tipo de Cliente (Classificação)")
 
 cls_tbl = df_f.copy()
-cls_tbl["CLASSIFICAÇÃO"] = cls_tbl["CLASSIFICAÇÃO"].fillna("").astype(str).str.strip()
-cls_tbl.loc[cls_tbl["CLASSIFICAÇÃO"] == "", "CLASSIFICAÇÃO"] = "(vazio)"
-
-cls = cls_tbl.groupby("CLASSIFICAÇÃO", as_index=False)["Valor total"].sum()
-cls = cls.sort_values("Valor total", ascending=False)
+cls_tbl["CLASSIFICAÇÃO"] = cls_tbl["CLASSIFICAÇÃO"].apply(normalizar_classificacao_cliente)
+cls = (
+    cls_tbl.groupby("CLASSIFICAÇÃO", as_index=False)["Valor total"].sum()
+    .sort_values("Valor total", ascending=False)
+)
 
 fig_pizza = px.pie(
-    cls,
-    names="CLASSIFICAÇÃO",
-    values="Valor total",
-    title="Faturamento por Classificação",
+    cls, names="CLASSIFICAÇÃO", values="Valor total",
+    title="Faturamento por Classificação", hole=0.35
 )
 fig_pizza.update_traces(texttemplate="%{percent:.1%}<br>R$ %{value:,.2f}")
 st.plotly_chart(fig_pizza, use_container_width=True)
+
+st.markdown("#### Drill-down por Classificação")
+classificacoes_disp = cls["CLASSIFICAÇÃO"].tolist()
+classificacao_sel = st.selectbox(
+    "Selecione a classificação para detalhar os clientes",
+    ["(Selecione)"] + classificacoes_disp,
+    index=0, key="drill_classificacao_cliente"
+)
+
+if classificacao_sel == "(Selecione)":
+    st.info("Selecione uma classificação para visualizar os clientes que a compõem.")
+else:
+    df_cls = cls_tbl[cls_tbl["CLASSIFICAÇÃO"] == classificacao_sel].copy()
+    total_classificacao = float(df_cls["Valor total"].sum())
+    total_geral_classificacao = float(cls_tbl["Valor total"].sum())
+
+    drill_cls = (
+        df_cls.groupby("Cliente", as_index=False)["Valor total"].sum()
+        .rename(columns={"Valor total": "FATURAMENTO"})
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+    drill_cls["% NA CLASSIFICAÇÃO"] = drill_cls["FATURAMENTO"].apply(
+        lambda x: x / total_classificacao if total_classificacao else 0.0
+    )
+    drill_cls["% NO GERAL"] = drill_cls["FATURAMENTO"].apply(
+        lambda x: x / total_geral_classificacao if total_geral_classificacao else 0.0
+    )
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Faturamento da classificação", f"R$ {format_brl(total_classificacao)}")
+    d2.metric("Clientes", f"{drill_cls['Cliente'].nunique():,}".replace(",", "."))
+    d3.metric("Participação no geral", pct_br(total_classificacao / total_geral_classificacao if total_geral_classificacao else 0.0))
+
+    drill_show = drill_cls.copy()
+    drill_show["FATURAMENTO"] = drill_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+    drill_show["% NA CLASSIFICAÇÃO"] = drill_show["% NA CLASSIFICAÇÃO"].apply(pct_br)
+    drill_show["% NO GERAL"] = drill_show["% NO GERAL"].apply(pct_br)
+    st.dataframe(drill_show, use_container_width=True, hide_index=True)
+    botao_download_pdf(
+        drill_show,
+        f"Clientes - {classificacao_sel}",
+        "drill_clientes_classificacao.pdf"
+    )
 
 st.divider()
 
@@ -1719,1304 +1757,3 @@ else:
 
 
 # =============================
-# 10) AGENTE DE BI - PERGUNTAS E RESPOSTAS
-# =============================
-st.divider()
-st.markdown("""
-<div class="chat-shell">
-    <div class="chat-title">
-        <div class="chat-avatar">BI</div>
-        <div>
-            <h2>Chat Comercial Inteligente</h2>
-            <p>Faça perguntas sobre faturamento, margem, clientes, produtos, UF, cidades, crescimento, metas, alertas e oportunidades.</p>
-        </div>
-    </div>
-    <div class="chat-examples">
-        <span class="chat-chip">Qual foi o faturamento de maio?</span>
-        <span class="chat-chip">Quais clientes caíram de março para abril?</span>
-        <span class="chat-chip">Compare 2026 com 2025</span>
-        <span class="chat-chip">Quais alertas comerciais existem?</span>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Observação técnica:
-# Este agente é gratuito e não depende de API paga. Ele usa interpretação por intenção + Pandas.
-# Opcionalmente, se rapidfuzz estiver instalado, ele melhora a busca aproximada por nomes de produtos/clientes.
-try:
-    from rapidfuzz import process as rf_process, fuzz as rf_fuzz
-    RAPIDFUZZ_OK = True
-except Exception:
-    import difflib
-    RAPIDFUZZ_OK = False
-
-
-def qa_norm(txt: str) -> str:
-    """Normaliza texto para interpretação de pergunta."""
-    txt = _to_ascii_lower(str(txt))
-    txt = re.sub(r"[^a-z0-9\s/%.,-]", " ", txt)
-    txt = re.sub(r"\s+", " ", txt).strip()
-    return txt
-
-
-def qa_currency(v) -> str:
-    return f"R$ {format_brl(float(v or 0))}"
-
-
-def qa_int(v) -> str:
-    try:
-        return f"{float(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "0"
-
-
-def qa_extract_top(pergunta: str, default: int = 10) -> int:
-    p = qa_norm(pergunta)
-    patterns = [
-        r"top\s*(\d+)",
-        r"(\d+)\s*(maiores|melhores|principais|clientes|produtos|cidades|ufs|estados)",
-        r"listar\s*(\d+)",
-        r"mostrar\s*(\d+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, p)
-        if m:
-            try:
-                return max(1, min(int(m.group(1)), 500))
-            except Exception:
-                pass
-    return default
-
-
-def qa_extract_months(pergunta: str) -> list:
-    p = qa_norm(pergunta)
-    meses = []
-    # Extenso
-    nomes = dict(MESES_LONG)
-    nomes.update({"jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6, "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12})
-    for nome, num in nomes.items():
-        if re.search(rf"\b{re.escape(qa_norm(nome))}\b", p) and num not in meses:
-            meses.append(num)
-    # Formatos 01/2026, mês 3 etc.
-    for n in re.findall(r"\b(0?[1-9]|1[0-2])(?:/\d{2,4})?\b", p):
-        ni = int(n)
-        if ni not in meses:
-            # Evita capturar top 10 como mês quando existe top antes
-            if re.search(rf"top\s*{ni}\b", p):
-                continue
-            meses.append(ni)
-    return meses
-
-
-def qa_month_label(m: int) -> str:
-    try:
-        return MESES_PT[int(m) - 1].upper()
-    except Exception:
-        return "PERÍODO"
-
-
-def qa_filter_month(df_base: pd.DataFrame, pergunta: str) -> tuple[pd.DataFrame, str, int | None]:
-    meses = qa_extract_months(pergunta)
-    if meses:
-        m = meses[0]
-        if "MES_NUM" in df_base.columns:
-            return df_base[df_base["MES_NUM"] == m].copy(), qa_month_label(m), m
-    return df_base.copy(), "período filtrado", None
-
-
-def qa_extract_uf(pergunta: str) -> str | None:
-    p_up = str(pergunta).upper()
-    ufs_validas = sorted({str(u).upper().strip() for u in df["UF"].dropna().unique().tolist() if str(u).strip()})
-    for uf in ufs_validas:
-        if re.search(rf"\b{re.escape(uf)}\b", p_up):
-            return uf
-    return None
-
-
-def qa_best_match(termo: str, opcoes: list[str], score_min: int = 55) -> str | None:
-    termo = str(termo or "").strip()
-    opcoes = [str(o) for o in opcoes if str(o).strip()]
-    if not termo or not opcoes:
-        return None
-    # match direto por contém
-    termo_n = qa_norm(termo)
-    candidatos = [o for o in opcoes if termo_n in qa_norm(o)]
-    if candidatos:
-        return sorted(candidatos, key=len)[0]
-    if RAPIDFUZZ_OK:
-        match = rf_process.extractOne(termo, opcoes, scorer=rf_fuzz.WRatio)
-        if match and match[1] >= score_min:
-            return match[0]
-    else:
-        import difflib
-        matches = difflib.get_close_matches(termo, opcoes, n=1, cutoff=score_min / 100)
-        if matches:
-            return matches[0]
-    return None
-
-
-def qa_prepare_products(df_p_original: pd.DataFrame, ano_base: int, meses_base: list[int]) -> pd.DataFrame:
-    required = ["Produto", "Quantidade", "MÊS", "ANO", "Valor total", "Custo total"]
-    if df_p_original is None or df_p_original.empty or any(c not in df_p_original.columns for c in required):
-        return pd.DataFrame()
-    d = df_p_original.copy()
-    d["Produto"] = d["Produto"].astype(str).fillna("").str.strip()
-    d["Quantidade"] = d["Quantidade"].apply(parse_brl_number)
-    d["Valor total"] = d["Valor total"].apply(parse_brl_number)
-    d["Custo total"] = d["Custo total"].apply(parse_brl_number)
-    d["MES_NUM"] = d["MÊS"].apply(parse_mes_to_num)
-    d["ANO"] = pd.to_numeric(d["ANO"], errors="coerce")
-    d = d[d["ANO"].notna()].copy()
-    d = d[d["ANO"].astype(int) == int(ano_base)].copy()
-    if meses_base:
-        d = d[d["MES_NUM"].isin(meses_base)].copy()
-    d["MARGEM_BRUTA_R$"] = d["Valor total"] - d["Custo total"]
-    d["MARGEM_BRUTA_%"] = d.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["Valor total"]) if r["Valor total"] else 0.0, axis=1)
-    return d
-
-
-df_prod_agent = qa_prepare_products(df_p, ano_sel, meses_sel)
-
-
-def qa_format_financial_table(d: pd.DataFrame, money_cols=None, pct_cols=None, int_cols=None) -> pd.DataFrame:
-    show = d.copy()
-    for c in money_cols or []:
-        if c in show.columns:
-            show[c] = show[c].apply(qa_currency)
-    for c in pct_cols or []:
-        if c in show.columns:
-            show[c] = show[c].apply(pct_br)
-    for c in int_cols or []:
-        if c in show.columns:
-            show[c] = show[c].apply(qa_int)
-    return show
-
-
-def qa_show_table(d: pd.DataFrame, title: str, file_name: str, max_rows: int = 100):
-    if d is None or d.empty:
-        st.warning("Não encontrei dados para essa análise dentro dos filtros atuais.")
-        return
-    d2 = d.head(max_rows).copy()
-    st.dataframe(d2, use_container_width=True, hide_index=True)
-    botao_download_pdf(d2, title, file_name)
-
-
-def qa_intent(pergunta: str) -> str:
-    p = qa_norm(pergunta)
-
-    # Intenções executivas / diretoria
-    if any(x in p for x in ["alerta", "alertas", "pontos de atencao", "atenção", "risco", "riscos"]):
-        return "alertas_comerciais"
-    if any(x in p for x in ["oportunidade", "oportunidades", "onde focar", "foco comercial", "prioridade comercial"]):
-        return "oportunidades_comerciais"
-    if any(x in p for x in ["meta", "falta para bater", "falta pra bater", "quanto falta"]):
-        return "meta_comercial"
-    if any(x in p for x in ["previsao", "previsão", "projecao", "projeção", "fechamento do mes", "fechamento do mês"]):
-        return "previsao_fechamento"
-    if any(x in p for x in ["ritmo", "acima do ano anterior", "abaixo do ano anterior", "ano anterior"]):
-        return "ritmo_vendas"
-
-    # Participação, concentração e ticket médio
-    if any(x in p for x in ["participacao", "participação", "representatividade", "share", "% do faturamento", "percentual do faturamento"]):
-        if any(x in p for x in ["produto", "produtos"]):
-            return "participacao_produtos"
-        if any(x in p for x in ["cidade", "localizacao", "localização", "municipio", "município"]):
-            return "participacao_cidades"
-        if any(x in p for x in ["uf", "estado", "estados", "regiao", "região"]):
-            return "participacao_uf"
-        return "participacao_clientes"
-    if any(x in p for x in ["concentracao", "concentração", "dependemos", "dependencia", "dependência", "top 10 representam", "maiores clientes representam"]):
-        return "concentracao_clientes"
-    if any(x in p for x in ["ticket medio", "ticket médio", "valor medio", "valor médio"]):
-        if any(x in p for x in ["cliente", "clientes"]):
-            return "ticket_medio_clientes"
-        if any(x in p for x in ["uf", "estado", "estados"]):
-            return "ticket_medio_uf"
-        if any(x in p for x in ["cidade", "localizacao", "localização"]):
-            return "ticket_medio_cidades"
-        return "ticket_medio_geral"
-
-    # Clientes: base, abandono e frequência
-    if any(x in p for x in ["cliente medio", "cliente médio", "media por cliente", "média por cliente"]):
-        return "cliente_medio"
-    if any(x in p for x in ["clientes perdidos", "deixaram de comprar", "nao compraram", "não compraram", "compravam", "perdidos"]):
-        return "clientes_perdidos"
-    if any(x in p for x in ["clientes novos", "novos clientes", "comecaram a comprar", "começaram a comprar", "primeira compra"]):
-        return "clientes_novos"
-    if any(x in p for x in ["inativos", "sem comprar", "sem compra", "abandono", "risco de abandono"]):
-        return "clientes_inativos"
-    if any(x in p for x in ["frequencia", "frequência", "compram todo mes", "compram todo mês", "recorrentes", "recorrencia", "recorrência"]):
-        return "frequencia_clientes"
-    if "curva abc" in p and any(x in p for x in ["cliente", "clientes"]):
-        return "abc_clientes"
-
-    # Produtos: mix, sem venda, cross selling e margem
-    if any(x in p for x in ["cross selling", "cross-selling", "venda cruzada", "compram", "mas nao compram", "mas não compram"]):
-        return "cross_selling"
-    if any(x in p for x in ["mix", "produtos diferentes", "quantos produtos"]):
-        if any(x in p for x in ["cliente", "clientes"]):
-            return "mix_por_cliente"
-        if any(x in p for x in ["uf", "estado", "cidade", "localizacao", "localização"]):
-            return "mix_por_regiao"
-        return "mix_produtos"
-    if any(x in p for x in ["sem venda", "nao venderam", "não venderam", "zerados", "produto parado", "produtos parados"]):
-        return "produtos_sem_venda"
-    if any(x in p for x in ["menor margem", "menores margens", "margem baixa", "margem negativa"]):
-        if any(x in p for x in ["produto", "produtos"]):
-            return "produtos_menor_margem"
-        if any(x in p for x in ["cliente", "clientes"]):
-            return "clientes_menor_margem"
-        if any(x in p for x in ["uf", "estado", "cidade"]):
-            return "regioes_menor_margem"
-    if any(x in p for x in ["maior margem", "maiores margens", "mais rentaveis", "mais rentáveis"]):
-        if any(x in p for x in ["produto", "produtos"]):
-            return "top_produtos_margem"
-        if any(x in p for x in ["cliente", "clientes"]):
-            return "top_clientes_margem"
-
-    # Intenções já existentes
-    if any(x in p for x in ["cairam", "caiu", "queda", "perderam", "reduziram", "diminuiu", "diminuiram"]):
-        if "cliente" in p:
-            return "clientes_queda"
-        if "produto" in p or "produtos" in p:
-            return "produtos_queda"
-    if any(x in p for x in ["aumentaram", "cresceram", "subiram", "evoluiram"]):
-        if "cliente" in p:
-            return "clientes_crescimento"
-        if "produto" in p or "produtos" in p:
-            return "produtos_crescimento"
-    if "giro" in p and ("produto" in p or "produtos" in p):
-        return "giro_produto"
-    if ("produto" in p or "produtos" in p) and "margem" in p:
-        return "top_produtos_margem"
-    if ("produto" in p or "produtos" in p) and any(x in p for x in ["quantidade", "qtd", "vendidos", "mais vendem"]):
-        return "top_produtos_quantidade"
-    if "produto" in p or "produtos" in p:
-        return "top_produtos_faturamento"
-    if ("cliente" in p or "clientes" in p) and "margem" in p:
-        return "top_clientes_margem"
-    if "cliente" in p or "clientes" in p:
-        return "top_clientes_faturamento"
-    if any(x in p for x in ["comparativo", "ranking", "ranking de vendas", "vendas na uf", "por uf", "por estado"]):
-        if any(x in p for x in ["uf", "estado", "regiao", "região"]):
-            return "comparativo_uf"
-    if any(x in p for x in ["uf", "estado", "regiao", "região"]):
-        if "margem" in p:
-            return "comparativo_uf_margem"
-        if "faturamento" in p or "venda" in p or "receita" in p:
-            return "faturamento_uf"
-        return "comparativo_uf"
-    if any(x in p for x in ["cidade", "localizacao", "localização", "municipio", "município"]):
-        return "ranking_cidades"
-    if any(x in p for x in ["crescimento", "cresceu", "quanto cresceu", "evolucao", "evolução"]):
-        return "crescimento_mes"
-    if any(x in p for x in ["faturamento", "receita", "venda", "vendas"]):
-        return "faturamento_mes"
-    if any(x in p for x in ["margem", "lucro bruto"]):
-        return "margem_geral"
-    return "desconhecido"
-
-def qa_aggregate_sales(d: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:
-    out = d.groupby(group_cols, as_index=False).agg(
-        FATURAMENTO=("Valor total", "sum"),
-        CUSTO=("Valor custo", "sum"),
-        QTD_REGISTROS=("Valor total", "count"),
-    )
-    out["MARGEM_BRUTA_R$"] = out["FATURAMENTO"] - out["CUSTO"]
-    out["MARGEM_BRUTA_%"] = out.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1)
-    return out
-
-
-
-def qa_extract_years(pergunta: str) -> list[int]:
-    """Extrai anos explícitos da pergunta, como 2026 e 2025."""
-    anos_encontrados = []
-    for y in re.findall(r"\b(20\d{2}|19\d{2})\b", str(pergunta)):
-        yi = int(y)
-        if yi not in anos_encontrados:
-            anos_encontrados.append(yi)
-    return anos_encontrados
-
-
-def qa_is_year_comparison(pergunta: str) -> bool:
-    p = qa_norm(pergunta)
-    anos_q = qa_extract_years(pergunta)
-    gatilhos = [
-        "comparar", "comparativo", "comparacao", "comparação", "versus", " vs ", " contra ",
-        "ano", "anos", "ano anterior", "desempenho", "evolucao", "evolução", "crescimento"
-    ]
-    return len(anos_q) >= 2 and any(g in f" {p} " for g in gatilhos)
-
-
-def qa_prepare_products_all_years(df_p_original: pd.DataFrame) -> pd.DataFrame:
-    """Prepara BASE DE PRODUTOS sem travar no ano selecionado, para comparativos ano x ano."""
-    required = ["Produto", "Quantidade", "MÊS", "ANO", "Valor total", "Custo total"]
-    if df_p_original is None or df_p_original.empty or any(c not in df_p_original.columns for c in required):
-        return pd.DataFrame()
-    d = df_p_original.copy()
-    d["Produto"] = d["Produto"].astype(str).fillna("").str.strip()
-    d["Quantidade"] = d["Quantidade"].apply(parse_brl_number)
-    d["Valor total"] = d["Valor total"].apply(parse_brl_number)
-    d["Custo total"] = d["Custo total"].apply(parse_brl_number)
-    d["MES_NUM"] = d["MÊS"].apply(parse_mes_to_num)
-    d["ANO"] = pd.to_numeric(d["ANO"], errors="coerce")
-    d = d[d["ANO"].notna()].copy()
-    d["ANO"] = d["ANO"].astype(int)
-    d["MARGEM_BRUTA_R$"] = d["Valor total"] - d["Custo total"]
-    d["MARGEM_BRUTA_%"] = d.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["Valor total"]) if r["Valor total"] else 0.0, axis=1)
-    return d
-
-
-def qa_year_dimension(pergunta: str) -> tuple[str | None, str]:
-    """Define a dimensão do comparativo anual a partir da pergunta."""
-    p = qa_norm(pergunta)
-    if "produto" in p or "produtos" in p or "giro" in p:
-        return "Produto", "produto"
-    if "cliente" in p or "clientes" in p:
-        return "Cliente", "cliente"
-    if any(x in p for x in ["cidade", "localizacao", "localização", "municipio", "município"]):
-        return "LOCALIZAÇÃO", "cidade/localização"
-    if any(x in p for x in ["bairro", "bairros"]):
-        return "BAIRRO", "bairro"
-    if any(x in p for x in ["uf", "estado", "estados", "regiao", "região"]):
-        return "UF", "UF/estado"
-    if any(x in p for x in ["classificacao", "classificação", "tipo de cliente"]):
-        return "CLASSIFICAÇÃO", "classificação"
-    return None, "geral"
-
-
-def qa_compare_years_sales(pergunta: str):
-    """Compara anos na base de vendas, para geral, UF, cidade, cliente, bairro ou classificação."""
-    anos_q = qa_extract_years(pergunta)
-    if len(anos_q) < 2:
-        st.warning("Informe dois anos na pergunta. Exemplo: comparar faturamento de 2026 com 2025.")
-        return
-
-    ano_a, ano_b = int(anos_q[0]), int(anos_q[1])
-    dim_col, dim_label = qa_year_dimension(pergunta)
-    top_n = qa_extract_top(pergunta, default=50)
-    meses_q = qa_extract_months(pergunta)
-    p = qa_norm(pergunta)
-
-    base = df[df["ANO"].isin([ano_a, ano_b])].copy()
-    if meses_q:
-        base = base[base["MES_NUM"].isin(meses_q)].copy()
-        periodo_txt = ", ".join(qa_month_label(m) for m in meses_q)
-    else:
-        periodo_txt = "ano completo"
-
-    if base.empty:
-        st.warning(f"Não encontrei dados de vendas para comparar {ano_a} com {ano_b} no período solicitado.")
-        return
-
-    metrica_base = "MARGEM_BRUTA_R$" if "margem" in p else "Valor total"
-    metrica_nome = "Margem Bruta" if metrica_base == "MARGEM_BRUTA_R$" else "Faturamento"
-
-    if dim_col is None:
-        agg = base.groupby("ANO", as_index=False).agg(
-            FATURAMENTO=("Valor total", "sum"),
-            CUSTO=("Valor custo", "sum"),
-            MARGEM_BRUTA_VALOR=("MARGEM_BRUTA_R$", "sum"),
-            QTD_REGISTROS=("Valor total", "count"),
-        ).rename(columns={"MARGEM_BRUTA_VALOR": "MARGEM_BRUTA_R$"})
-        dados = {int(r["ANO"]): r for _, r in agg.iterrows()}
-        va = float(dados.get(ano_a, {}).get("FATURAMENTO", 0.0))
-        vb = float(dados.get(ano_b, {}).get("FATURAMENTO", 0.0))
-        ca = float(dados.get(ano_a, {}).get("CUSTO", 0.0))
-        cb = float(dados.get(ano_b, {}).get("CUSTO", 0.0))
-        ma = float(dados.get(ano_a, {}).get("MARGEM_BRUTA_R$", 0.0))
-        mb = float(dados.get(ano_b, {}).get("MARGEM_BRUTA_R$", 0.0))
-        dif = (ma - mb) if metrica_base == "MARGEM_BRUTA_R$" else (va - vb)
-        base_ref = mb if metrica_base == "MARGEM_BRUTA_R$" else vb
-        var_pct = (dif / base_ref) if base_ref else 0.0
-        st.success(f"Comparativo anual geral: {ano_a} x {ano_b} ({periodo_txt}). {metrica_nome} variou {qa_currency(dif)} ({pct_br(var_pct)}).")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(f"Faturamento {ano_a}", qa_currency(va))
-        c2.metric(f"Faturamento {ano_b}", qa_currency(vb))
-        c3.metric("Diferença", qa_currency(dif), pct_br(var_pct))
-        c4.metric(f"Margem {ano_a}", qa_currency(ma))
-
-        detalhe = pd.DataFrame([
-            {"ANO": ano_b, "FATURAMENTO": vb, "CUSTO": cb, "MARGEM_BRUTA_R$": mb, "MARGEM_BRUTA_%": (mb / vb) if vb else 0.0},
-            {"ANO": ano_a, "FATURAMENTO": va, "CUSTO": ca, "MARGEM_BRUTA_R$": ma, "MARGEM_BRUTA_%": (ma / va) if va else 0.0},
-        ])
-        show = qa_format_financial_table(detalhe, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"])
-        qa_show_table(show, "Comparativo Anual Geral - Agente BI", "comparativo_anual_geral_agente_bi.pdf", 10)
-        return
-
-    if dim_col not in base.columns:
-        st.warning(f"A coluna {dim_col} não existe na base de vendas para fazer esse comparativo.")
-        return
-
-    agg = base.groupby([dim_col, "ANO"], as_index=False).agg(
-        FATURAMENTO=("Valor total", "sum"),
-        CUSTO=("Valor custo", "sum"),
-        MARGEM_BRUTA_VALOR=("MARGEM_BRUTA_R$", "sum"),
-        QTD_REGISTROS=("Valor total", "count"),
-    ).rename(columns={"MARGEM_BRUTA_VALOR": "MARGEM_BRUTA_R$"})
-    valor_col = "MARGEM_BRUTA_R$" if metrica_base == "MARGEM_BRUTA_R$" else "FATURAMENTO"
-    pv = agg.pivot_table(index=dim_col, columns="ANO", values=valor_col, aggfunc="sum", fill_value=0.0).reset_index()
-    for y in [ano_a, ano_b]:
-        if y not in pv.columns:
-            pv[y] = 0.0
-    pv = pv[[dim_col, ano_b, ano_a]].copy()
-    pv.columns = [dim_col, f"{metrica_nome} {ano_b}", f"{metrica_nome} {ano_a}"]
-    pv["DIFERENÇA_R$"] = pv[f"{metrica_nome} {ano_a}"] - pv[f"{metrica_nome} {ano_b}"]
-    pv["VARIAÇÃO_%"] = pv.apply(lambda r: (r["DIFERENÇA_R$"] / r[f"{metrica_nome} {ano_b}"]) if r[f"{metrica_nome} {ano_b}"] else (1.0 if r[f"{metrica_nome} {ano_a}"] > 0 else 0.0), axis=1)
-
-    # Complementa com margem percentual do ano A quando a base permite.
-    fat_a = agg[agg["ANO"] == ano_a][[dim_col, "FATURAMENTO", "MARGEM_BRUTA_R$"]].copy()
-    fat_a["MARGEM_%_" + str(ano_a)] = fat_a.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1)
-    fat_a = fat_a[[dim_col, "MARGEM_%_" + str(ano_a)]]
-    pv = pv.merge(fat_a, on=dim_col, how="left")
-
-    if any(x in p for x in ["cairam", "caiu", "queda", "perderam", "reduziram", "diminuiu", "diminuiram"]):
-        pv = pv[pv["DIFERENÇA_R$"] < 0].sort_values("DIFERENÇA_R$", ascending=True)
-        direcao = "queda"
-    elif any(x in p for x in ["aumentaram", "cresceram", "subiram", "evoluiram", "crescimento"]):
-        pv = pv[pv["DIFERENÇA_R$"] > 0].sort_values("DIFERENÇA_R$", ascending=False)
-        direcao = "crescimento"
-    else:
-        pv = pv.sort_values(f"{metrica_nome} {ano_a}", ascending=False)
-        direcao = "desempenho"
-
-    st.success(f"Comparativo anual por {dim_label}: {ano_a} x {ano_b} ({periodo_txt}), analisando {metrica_nome.lower()} e ordenado por {direcao}.")
-    show = pv.head(top_n).copy()
-    money_cols = [f"{metrica_nome} {ano_b}", f"{metrica_nome} {ano_a}", "DIFERENÇA_R$"]
-    pct_cols = ["VARIAÇÃO_%", "MARGEM_%_" + str(ano_a)]
-    show = qa_format_financial_table(show, money_cols, pct_cols)
-    qa_show_table(show, f"Comparativo Anual por {dim_label} - Agente BI", f"comparativo_anual_{dim_label.replace('/', '_')}_agente_bi.pdf", top_n)
-
-
-def qa_compare_years_products(pergunta: str):
-    """Compara anos na BASE DE PRODUTOS."""
-    anos_q = qa_extract_years(pergunta)
-    if len(anos_q) < 2:
-        st.warning("Informe dois anos na pergunta. Exemplo: comparar produtos de 2026 com 2025.")
-        return
-    ano_a, ano_b = int(anos_q[0]), int(anos_q[1])
-    top_n = qa_extract_top(pergunta, default=50)
-    meses_q = qa_extract_months(pergunta)
-    p = qa_norm(pergunta)
-
-    dprod_all = qa_prepare_products_all_years(df_p)
-    if dprod_all.empty:
-        st.warning("Não foi possível comparar produtos por ano. Confira a aba BASE DE PRODUTOS.")
-        return
-    base = dprod_all[dprod_all["ANO"].isin([ano_a, ano_b])].copy()
-    if meses_q:
-        base = base[base["MES_NUM"].isin(meses_q)].copy()
-        periodo_txt = ", ".join(qa_month_label(m) for m in meses_q)
-    else:
-        periodo_txt = "ano completo"
-    if base.empty:
-        st.warning(f"Não encontrei dados de produtos para comparar {ano_a} com {ano_b} no período solicitado.")
-        return
-
-    if "margem" in p:
-        valor_col = "MARGEM_BRUTA_R$"
-        metrica_nome = "Margem Bruta"
-    elif any(x in p for x in ["quantidade", "qtd", "giro", "vendidos"]):
-        valor_col = "Quantidade"
-        metrica_nome = "Quantidade/Giro"
-    else:
-        valor_col = "Valor total"
-        metrica_nome = "Faturamento"
-
-    agg = base.groupby(["Produto", "ANO"], as_index=False).agg(
-        QTD=("Quantidade", "sum"),
-        FATURAMENTO=("Valor total", "sum"),
-        CUSTO=("Custo total", "sum"),
-        MARGEM_BRUTA_VALOR=("MARGEM_BRUTA_R$", "sum"),
-    ).rename(columns={"MARGEM_BRUTA_VALOR": "MARGEM_BRUTA_R$"})
-    source_col = {"Quantidade": "QTD", "Valor total": "FATURAMENTO", "MARGEM_BRUTA_R$": "MARGEM_BRUTA_R$"}[valor_col]
-    pv = agg.pivot_table(index="Produto", columns="ANO", values=source_col, aggfunc="sum", fill_value=0.0).reset_index()
-    for y in [ano_a, ano_b]:
-        if y not in pv.columns:
-            pv[y] = 0.0
-    pv = pv[["Produto", ano_b, ano_a]].copy()
-    pv.columns = ["Produto", f"{metrica_nome} {ano_b}", f"{metrica_nome} {ano_a}"]
-    pv["DIFERENÇA"] = pv[f"{metrica_nome} {ano_a}"] - pv[f"{metrica_nome} {ano_b}"]
-    pv["VARIAÇÃO_%"] = pv.apply(lambda r: (r["DIFERENÇA"] / r[f"{metrica_nome} {ano_b}"]) if r[f"{metrica_nome} {ano_b}"] else (1.0 if r[f"{metrica_nome} {ano_a}"] > 0 else 0.0), axis=1)
-
-    if any(x in p for x in ["cairam", "caiu", "queda", "perderam", "reduziram"]):
-        pv = pv[pv["DIFERENÇA"] < 0].sort_values("DIFERENÇA", ascending=True)
-        direcao = "queda"
-    elif any(x in p for x in ["aumentaram", "cresceram", "subiram", "crescimento"]):
-        pv = pv[pv["DIFERENÇA"] > 0].sort_values("DIFERENÇA", ascending=False)
-        direcao = "crescimento"
-    else:
-        pv = pv.sort_values(f"{metrica_nome} {ano_a}", ascending=False)
-        direcao = "desempenho"
-
-    st.success(f"Comparativo anual de produtos: {ano_a} x {ano_b} ({periodo_txt}), analisando {metrica_nome.lower()} e ordenado por {direcao}.")
-    show = pv.head(top_n).copy()
-    if valor_col == "Quantidade":
-        show = qa_format_financial_table(show, [], ["VARIAÇÃO_%"], [f"{metrica_nome} {ano_b}", f"{metrica_nome} {ano_a}", "DIFERENÇA"])
-    else:
-        show = qa_format_financial_table(show, [f"{metrica_nome} {ano_b}", f"{metrica_nome} {ano_a}", "DIFERENÇA"], ["VARIAÇÃO_%"])
-    qa_show_table(show, "Comparativo Anual de Produtos - Agente BI", "comparativo_anual_produtos_agente_bi.pdf", top_n)
-
-
-# =============================
-# INTENÇÕES ESTRATÉGICAS ADICIONAIS DO AGENTE
-# =============================
-def qa_extract_number_value(pergunta: str) -> float | None:
-    """Extrai valor monetário/numérico da pergunta para uso em metas."""
-    txt = str(pergunta).lower().replace("r$", " ")
-    mult = 1.0
-    if "milhao" in qa_norm(txt) or "milhão" in txt or "milhoes" in qa_norm(txt) or "milhões" in txt:
-        mult = 1_000_000.0
-    elif " mil" in f" {txt} ":
-        mult = 1_000.0
-    nums = re.findall(r"\d+(?:[\.\,]\d+)*", txt)
-    if not nums:
-        return None
-    raw = nums[-1]
-    val = parse_brl_number(raw)
-    return val * mult if val else None
-
-
-def qa_extract_days(pergunta: str, default: int = 90) -> int:
-    p = qa_norm(pergunta)
-    m = re.search(r"(\d+)\s*dias", p)
-    if m:
-        return max(1, int(m.group(1)))
-    m = re.search(r"(\d+)\s*mes", p)
-    if m:
-        return max(1, int(m.group(1)) * 30)
-    return default
-
-
-def qa_table_participacao(d: pd.DataFrame, group_col: str, titulo: str, nome_pdf: str, top_n: int = 50):
-    if group_col not in d.columns or d.empty:
-        st.warning("Não encontrei dados suficientes para calcular participação.")
-        return
-    out = qa_aggregate_sales(d, [group_col]).sort_values("FATURAMENTO", ascending=False)
-    total = float(out["FATURAMENTO"].sum())
-    out["PARTICIPAÇÃO_%"] = out["FATURAMENTO"].apply(lambda x: (x / total) if total else 0.0)
-    st.success(f"Participação por {group_col}: total analisado de {qa_currency(total)}.")
-    show = qa_format_financial_table(out.head(top_n), ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%", "PARTICIPAÇÃO_%"], ["QTD_REGISTROS"])
-    qa_show_table(show, titulo, nome_pdf, top_n)
-
-
-def qa_ticket_medio(d: pd.DataFrame, group_col: str | None, titulo: str, nome_pdf: str, top_n: int = 50):
-    if d.empty:
-        st.warning("Não encontrei dados para calcular ticket médio.")
-        return
-    if group_col is None:
-        pedidos = int(len(d))
-        fat = float(d["Valor total"].sum())
-        ticket = fat / pedidos if pedidos else 0.0
-        clientes = int(d["Cliente"].nunique()) if "Cliente" in d.columns else 0
-        cliente_medio = fat / clientes if clientes else 0.0
-        st.success(f"Ticket médio geral: {qa_currency(ticket)} por registro/pedido.")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Faturamento", qa_currency(fat))
-        c2.metric("Qtd. registros/pedidos", qa_int(pedidos))
-        c3.metric("Ticket médio", qa_currency(ticket))
-        st.info(f"Valor médio por cliente ativo no período: {qa_currency(cliente_medio)}.")
-        return
-    if group_col not in d.columns:
-        st.warning(f"A coluna {group_col} não existe na base.")
-        return
-    out = d.groupby(group_col, as_index=False).agg(
-        FATURAMENTO=("Valor total", "sum"),
-        QTD_REGISTROS=("Valor total", "count"),
-        CLIENTES=("Cliente", "nunique"),
-    )
-    out["TICKET_MEDIO"] = out.apply(lambda r: (r["FATURAMENTO"] / r["QTD_REGISTROS"]) if r["QTD_REGISTROS"] else 0.0, axis=1)
-    out["CLIENTE_MEDIO"] = out.apply(lambda r: (r["FATURAMENTO"] / r["CLIENTES"]) if r["CLIENTES"] else 0.0, axis=1)
-    out = out.sort_values("FATURAMENTO", ascending=False).head(top_n)
-    show = qa_format_financial_table(out, ["FATURAMENTO", "TICKET_MEDIO", "CLIENTE_MEDIO"], [], ["QTD_REGISTROS", "CLIENTES"])
-    qa_show_table(show, titulo, nome_pdf, top_n)
-
-
-def qa_clientes_perdidos_novos(pergunta: str, tipo: str, top_n: int = 100):
-    anos_q = qa_extract_years(pergunta)
-    if len(anos_q) >= 2:
-        ano_atual, ano_base = int(anos_q[0]), int(anos_q[1])
-    else:
-        ano_atual, ano_base = int(ano_sel), int(ano_sel) - 1
-    meses_q = qa_extract_months(pergunta)
-    base_ant = df[df["ANO"] == ano_base].copy()
-    base_atual = df[df["ANO"] == ano_atual].copy()
-    if meses_q:
-        base_ant = base_ant[base_ant["MES_NUM"].isin(meses_q)].copy()
-        base_atual = base_atual[base_atual["MES_NUM"].isin(meses_q)].copy()
-    cli_ant = set(base_ant["Cliente"].dropna().astype(str))
-    cli_atual = set(base_atual["Cliente"].dropna().astype(str))
-    alvo = (cli_ant - cli_atual) if tipo == "perdidos" else (cli_atual - cli_ant)
-    base_ref = base_ant if tipo == "perdidos" else base_atual
-    out = qa_aggregate_sales(base_ref[base_ref["Cliente"].astype(str).isin(alvo)], ["Cliente"]).sort_values("FATURAMENTO", ascending=False)
-    st.success(f"Clientes {tipo}: {len(alvo)} cliente(s) comparando {ano_atual} com {ano_base}.")
-    show = qa_format_financial_table(out.head(top_n), ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-    qa_show_table(show, f"Clientes {tipo.title()} - Agente BI", f"clientes_{tipo}_agente_bi.pdf", top_n)
-
-
-def qa_clientes_inativos(pergunta: str, top_n: int = 100):
-    dias = qa_extract_days(pergunta, default=90)
-    hoje = pd.Timestamp.today().normalize()
-    if int(ano_sel) < hoje.year:
-        hoje = df_ano["DATA2"].max().normalize()
-    limite = hoje - pd.Timedelta(days=dias)
-    ult = df_ano.groupby("Cliente", as_index=False).agg(
-        ULTIMA_COMPRA=("DATA2", "max"),
-        FATURAMENTO=("Valor total", "sum"),
-        QTD_REGISTROS=("Valor total", "count"),
-    )
-    out = ult[ult["ULTIMA_COMPRA"] < limite].copy()
-    out["DIAS_SEM_COMPRA"] = (hoje - out["ULTIMA_COMPRA"]).dt.days
-    out = out.sort_values("DIAS_SEM_COMPRA", ascending=False).head(top_n)
-    out["ULTIMA_COMPRA"] = out["ULTIMA_COMPRA"].dt.strftime("%d/%m/%Y")
-    show = qa_format_financial_table(out, ["FATURAMENTO"], [], ["QTD_REGISTROS", "DIAS_SEM_COMPRA"])
-    st.success(f"Clientes sem compra há mais de {dias} dias: {len(out)} exibidos.")
-    qa_show_table(show, "Clientes Inativos - Agente BI", "clientes_inativos_agente_bi.pdf", top_n)
-
-
-def qa_frequencia_clientes(top_n: int = 100):
-    meses_ano = max(1, int(df_ano["MES_NUM"].nunique()))
-    out = df_ano.groupby("Cliente", as_index=False).agg(
-        MESES_COM_COMPRA=("MES_NUM", "nunique"),
-        FATURAMENTO=("Valor total", "sum"),
-        QTD_REGISTROS=("Valor total", "count"),
-    )
-    out["FREQUÊNCIA_%"] = out["MESES_COM_COMPRA"] / meses_ano
-    out = out.sort_values(["MESES_COM_COMPRA", "FATURAMENTO"], ascending=[False, False]).head(top_n)
-    show = qa_format_financial_table(out, ["FATURAMENTO"], ["FREQUÊNCIA_%"], ["MESES_COM_COMPRA", "QTD_REGISTROS"])
-    st.success(f"Frequência de compra por cliente considerando {meses_ano} mês(es) disponíveis no ano selecionado.")
-    qa_show_table(show, "Frequência de Clientes - Agente BI", "frequencia_clientes_agente_bi.pdf", top_n)
-
-
-def qa_abc_clientes(top_n: int = 500):
-    abc = abc_classification(df_ano, value_col="Valor total", label_col="Cliente")
-    abc = abc.rename(columns={"Valor total": "FATURAMENTO", "%": "PARTICIPAÇÃO_%", "% Acum": "PARTICIPAÇÃO_ACUM_%", "Curva": "CURVA"})
-    resumo = abc.groupby("CURVA", as_index=False).agg(CLIENTES=("Cliente", "count"), FATURAMENTO=("FATURAMENTO", "sum"))
-    total = float(abc["FATURAMENTO"].sum())
-    resumo["PARTICIPAÇÃO_%"] = resumo["FATURAMENTO"].apply(lambda x: (x / total) if total else 0.0)
-    st.success("Curva ABC de clientes gerada por faturamento.")
-    st.dataframe(qa_format_financial_table(resumo, ["FATURAMENTO"], ["PARTICIPAÇÃO_%"], ["CLIENTES"]), use_container_width=True, hide_index=True)
-    show = qa_format_financial_table(abc.head(top_n), ["FATURAMENTO"], ["PARTICIPAÇÃO_%", "PARTICIPAÇÃO_ACUM_%"])
-    qa_show_table(show, "Curva ABC Clientes - Agente BI", "curva_abc_clientes_agente_bi.pdf", top_n)
-
-
-def qa_concentracao_clientes(top_n: int = 10):
-    out = qa_aggregate_sales(df_ano, ["Cliente"]).sort_values("FATURAMENTO", ascending=False)
-    total = float(out["FATURAMENTO"].sum())
-    top = float(out.head(top_n)["FATURAMENTO"].sum())
-    part = top / total if total else 0.0
-    st.success(f"Os top {top_n} clientes representam {pct_br(part)} do faturamento do ano selecionado.")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Faturamento Total", qa_currency(total))
-    c2.metric(f"Top {top_n}", qa_currency(top))
-    c3.metric("Concentração", pct_br(part))
-    show = qa_format_financial_table(out.head(top_n), ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-    qa_show_table(show, "Concentração de Clientes - Agente BI", "concentracao_clientes_agente_bi.pdf", top_n)
-
-
-def qa_produtos_sem_venda(top_n: int = 500):
-    if df_prod_agent.empty:
-        st.warning("Não foi possível analisar produtos sem venda. Confira a aba BASE DE PRODUTOS.")
-        return
-    todos = set(df_prod_agent["Produto"].dropna().astype(str))
-    vendidos = set(df_prod_agent[df_prod_agent["Quantidade"] > 0]["Produto"].dropna().astype(str))
-    sem = sorted(todos - vendidos)
-    out = pd.DataFrame({"Produto": sem})
-    st.success(f"Produtos sem venda no período filtrado: {len(sem)}.")
-    qa_show_table(out.head(top_n), "Produtos Sem Venda - Agente BI", "produtos_sem_venda_agente_bi.pdf", top_n)
-
-
-def qa_mix_produtos(pergunta: str, top_n: int = 100):
-    p = qa_norm(pergunta)
-    if df_prod_agent.empty:
-        st.warning("Não foi possível analisar mix. Confira a aba BASE DE PRODUTOS.")
-        return
-    if "Cliente" in df.columns and any(x in p for x in ["cliente", "clientes"]):
-        # A BASE DE PRODUTOS pode não ter cliente. Usa a base de vendas se Produto existir nela; caso contrário, informa limitação.
-        if "Produto" not in df_ano.columns:
-            st.warning("Para mix por cliente, a aba de vendas precisa ter a coluna Produto. Na base atual, o mix detalhado está na BASE DE PRODUTOS sem vínculo por cliente.")
-            return
-    total_produtos = int(df_prod_agent[df_prod_agent["Quantidade"] > 0]["Produto"].nunique())
-    fat = float(df_prod_agent["Valor total"].sum())
-    st.success(f"Mix vendido no período: {total_produtos} produto(s) diferentes, com faturamento de {qa_currency(fat)}.")
-    out = df_prod_agent.groupby("Produto", as_index=False).agg(QTD=("Quantidade", "sum"), FATURAMENTO=("Valor total", "sum"))
-    out = out[out["QTD"] > 0].sort_values("FATURAMENTO", ascending=False).head(top_n)
-    show = qa_format_financial_table(out, ["FATURAMENTO"], [], ["QTD"])
-    qa_show_table(show, "Mix de Produtos - Agente BI", "mix_produtos_agente_bi.pdf", top_n)
-
-
-def qa_menor_margem(d: pd.DataFrame, group_col: str, titulo: str, nome_pdf: str, top_n: int = 50):
-    out = qa_aggregate_sales(d, [group_col])
-    out = out.sort_values("MARGEM_BRUTA_%", ascending=True).head(top_n)
-    st.success(f"Menores margens por {group_col}.")
-    show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-    qa_show_table(show, titulo, nome_pdf, top_n)
-
-
-def qa_produtos_menor_margem(top_n: int = 50):
-    if df_prod_agent.empty:
-        st.warning("Não foi possível analisar margem de produtos. Confira a aba BASE DE PRODUTOS.")
-        return
-    out = df_prod_agent.groupby("Produto", as_index=False).agg(
-        FATURAMENTO=("Valor total", "sum"), CUSTO=("Custo total", "sum"), QTD=("Quantidade", "sum")
-    )
-    out["MARGEM_BRUTA_R$"] = out["FATURAMENTO"] - out["CUSTO"]
-    out["MARGEM_BRUTA_%"] = out.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1)
-    out = out[out["FATURAMENTO"] > 0].sort_values("MARGEM_BRUTA_%", ascending=True).head(top_n)
-    show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD"])
-    qa_show_table(show, "Produtos com Menor Margem - Agente BI", "produtos_menor_margem_agente_bi.pdf", top_n)
-
-
-def qa_cross_selling(pergunta: str, top_n: int = 100):
-    if "Produto" not in df_ano.columns:
-        st.warning("Para cross selling, a aba RELATÓRIO DE VENDAS precisa ter uma coluna Produto vinculada ao cliente. Na base atual, produtos e clientes parecem estar em abas separadas.")
-        return
-    p = qa_norm(pergunta)
-    produtos = sorted(df_ano["Produto"].dropna().astype(str).unique().tolist())
-    # tenta capturar termos depois de 'compram' e 'nao compram'
-    partes = re.split(r"mas nao compram|mas não compram", p)
-    if len(partes) < 2:
-        st.warning("Escreva assim: clientes que compram produto A mas não compram produto B.")
-        return
-    termo_a = partes[0].replace("clientes que compram", "").replace("compram", "").strip()
-    termo_b = partes[1].strip()
-    prod_a = qa_best_match(termo_a, produtos, 40)
-    prod_b = qa_best_match(termo_b, produtos, 40)
-    if not prod_a or not prod_b:
-        st.warning("Não consegui identificar os dois produtos para venda cruzada.")
-        return
-    cli_a = set(df_ano[df_ano["Produto"] == prod_a]["Cliente"].astype(str))
-    cli_b = set(df_ano[df_ano["Produto"] == prod_b]["Cliente"].astype(str))
-    alvo = cli_a - cli_b
-    base = df_ano[df_ano["Cliente"].astype(str).isin(alvo)]
-    out = qa_aggregate_sales(base, ["Cliente"]).sort_values("FATURAMENTO", ascending=False).head(top_n)
-    st.success(f"Clientes que compram '{prod_a}' mas não compram '{prod_b}': {len(alvo)}.")
-    show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-    qa_show_table(show, "Cross Selling - Agente BI", "cross_selling_agente_bi.pdf", top_n)
-
-
-def qa_alertas_comerciais():
-    alertas = []
-    fat = float(df_ano["Valor total"].sum())
-    margem = float(df_ano["MARGEM_BRUTA_R$"].sum())
-    margem_pct = margem / fat if fat else 0.0
-    if margem_pct < 0.25:
-        alertas.append({"Alerta": "Margem bruta abaixo de 25%", "Impacto": pct_br(margem_pct), "Ação sugerida": "Revisar preços, descontos e produtos de baixa margem."})
-    conc = qa_aggregate_sales(df_ano, ["Cliente"]).sort_values("FATURAMENTO", ascending=False)
-    if not conc.empty:
-        part_top10 = float(conc.head(10)["FATURAMENTO"].sum()) / fat if fat else 0.0
-        if part_top10 > 0.5:
-            alertas.append({"Alerta": "Alta concentração nos top 10 clientes", "Impacto": pct_br(part_top10), "Ação sugerida": "Ampliar carteira ativa e reduzir dependência."})
-    # clientes que compraram em meses anteriores e não compraram no último mês disponível
-    ult_mes = int(df_ano["MES_NUM"].max()) if not df_ano.empty else None
-    if ult_mes:
-        cli_antes = set(df_ano[df_ano["MES_NUM"] < ult_mes]["Cliente"].astype(str))
-        cli_ult = set(df_ano[df_ano["MES_NUM"] == ult_mes]["Cliente"].astype(str))
-        perdidos_mes = len(cli_antes - cli_ult)
-        if perdidos_mes > 0:
-            alertas.append({"Alerta": f"Clientes sem compra em {qa_month_label(ult_mes)}", "Impacto": qa_int(perdidos_mes), "Ação sugerida": "Gerar lista de reativação para o time comercial."})
-    if not alertas:
-        alertas.append({"Alerta": "Nenhum alerta crítico automático encontrado", "Impacto": "—", "Ação sugerida": "Manter acompanhamento de margem, clientes e regiões."})
-    st.success("Alertas comerciais automáticos gerados.")
-    st.dataframe(pd.DataFrame(alertas), use_container_width=True, hide_index=True)
-
-
-def qa_oportunidades_comerciais(top_n: int = 20):
-    oportunidades = []
-    uf = qa_aggregate_sales(df_ano, ["UF"]).sort_values("MARGEM_BRUTA_%", ascending=False)
-    if not uf.empty:
-        for _, r in uf.head(5).iterrows():
-            oportunidades.append({"Oportunidade": f"Expandir foco na UF {r['UF']}", "Base": qa_currency(r["FATURAMENTO"]), "Motivo": f"Margem de {pct_br(r['MARGEM_BRUTA_%'])}."})
-    clientes = qa_aggregate_sales(df_ano, ["Cliente"]).sort_values("FATURAMENTO", ascending=False)
-    if not clientes.empty:
-        for _, r in clientes.head(5).iterrows():
-            oportunidades.append({"Oportunidade": f"Proteger/expandir cliente {r['Cliente']}", "Base": qa_currency(r["FATURAMENTO"]), "Motivo": "Cliente relevante na curva de faturamento."})
-    if df_prod_agent is not None and not df_prod_agent.empty:
-        prod = df_prod_agent.groupby("Produto", as_index=False).agg(FATURAMENTO=("Valor total", "sum"), MARGEM=("MARGEM_BRUTA_R$", "sum"))
-        prod["MARGEM_%"] = prod.apply(lambda r: (r["MARGEM"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1)
-        prod = prod.sort_values("MARGEM_%", ascending=False).head(5)
-        for _, r in prod.iterrows():
-            oportunidades.append({"Oportunidade": f"Priorizar produto {r['Produto']}", "Base": qa_currency(r["FATURAMENTO"]), "Motivo": f"Produto com margem de {pct_br(r['MARGEM_%'])}."})
-    st.success("Oportunidades comerciais automáticas geradas.")
-    qa_show_table(pd.DataFrame(oportunidades).head(top_n), "Oportunidades Comerciais - Agente BI", "oportunidades_comerciais_agente_bi.pdf", top_n)
-
-
-def qa_meta_comercial(pergunta: str):
-    meta = qa_extract_number_value(pergunta)
-    if not meta:
-        st.warning("Informe a meta na pergunta. Exemplo: quanto falta para bater a meta de R$ 1.000.000?")
-        return
-    realizado = float(df_f["Valor total"].sum())
-    falta = max(meta - realizado, 0.0)
-    pct_meta = realizado / meta if meta else 0.0
-    st.success(f"Realizado de {qa_currency(realizado)} contra meta de {qa_currency(meta)}. Falta {qa_currency(falta)}.")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Meta", qa_currency(meta))
-    c2.metric("Realizado", qa_currency(realizado), pct_br(pct_meta))
-    c3.metric("Falta", qa_currency(falta))
-
-
-def qa_previsao_fechamento():
-    if df_f.empty:
-        st.warning("Não há dados no período filtrado para previsão.")
-        return
-    ini = pd.Timestamp(d_ini)
-    fim = pd.Timestamp(d_fim)
-    datas_venda = sorted(df_f["DATA2"].dt.normalize().unique())
-    dias_com_venda = len(datas_venda)
-    realizado = float(df_f["Valor total"].sum())
-    media_dia = realizado / dias_com_venda if dias_com_venda else 0.0
-    dias_uteis_periodo = len(pd.bdate_range(ini, fim))
-    previsao = media_dia * dias_uteis_periodo
-    st.success(f"Previsão de fechamento pelo ritmo atual: {qa_currency(previsao)}.")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Realizado", qa_currency(realizado))
-    c2.metric("Dias com venda", qa_int(dias_com_venda))
-    c3.metric("Média/dia", qa_currency(media_dia))
-    c4.metric("Previsão", qa_currency(previsao))
-
-
-def qa_ritmo_vendas():
-    ano_ant = int(ano_sel) - 1
-    atual = float(df_f["Valor total"].sum())
-    ini_ant = (pd.Timestamp(d_ini) - pd.DateOffset(years=1)).date()
-    fim_ant = (pd.Timestamp(d_fim) - pd.DateOffset(years=1)).date()
-    base_ant = df[(df["ANO"] == ano_ant) & (df["DATA2"].dt.date >= ini_ant) & (df["DATA2"].dt.date <= fim_ant)]
-    ant = float(base_ant["Valor total"].sum())
-    dif = atual - ant
-    pct = dif / ant if ant else 0.0
-    status = "acima" if dif >= 0 else "abaixo"
-    st.success(f"O ritmo atual está {status} do ano anterior em {qa_currency(abs(dif))} ({pct_br(pct)}).")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(f"{ano_sel}", qa_currency(atual))
-    c2.metric(f"{ano_ant}", qa_currency(ant))
-    c3.metric("Diferença", qa_currency(dif), pct_br(pct))
-
-def qa_answer(pergunta: str):
-    pergunta = str(pergunta or "").strip()
-    if not pergunta:
-        st.info("Digite uma pergunta para o agente responder.")
-        return
-
-    intent = qa_intent(pergunta)
-    top_n = qa_extract_top(pergunta)
-    d_mes, label_periodo, mes_num = qa_filter_month(df_ano, pergunta)
-    pnorm = qa_norm(pergunta)
-
-    # Comparativo ano x ano: 2026 x 2025, 2025 x 2024 etc.
-    # Esta camada vem antes das intenções de mês, porque usa a base completa e não apenas o ano do filtro lateral.
-    if qa_is_year_comparison(pergunta):
-        if "produto" in pnorm or "produtos" in pnorm or "giro" in pnorm:
-            qa_compare_years_products(pergunta)
-        else:
-            qa_compare_years_sales(pergunta)
-        return
-
-    with st.caption(f"Intenção identificada: {intent} | Base: {label_periodo} | Ano: {ano_sel}"):
-        pass
-
-    # =============================
-    # Intenções estratégicas adicionadas
-    # =============================
-    if intent == "participacao_clientes":
-        qa_table_participacao(d_mes, "Cliente", "Participação por Cliente - Agente BI", "participacao_clientes_agente_bi.pdf", top_n)
-        return
-    if intent == "participacao_uf":
-        qa_table_participacao(d_mes, "UF", "Participação por UF - Agente BI", "participacao_uf_agente_bi.pdf", top_n)
-        return
-    if intent == "participacao_cidades":
-        qa_table_participacao(d_mes, "LOCALIZAÇÃO", "Participação por Cidade - Agente BI", "participacao_cidades_agente_bi.pdf", top_n)
-        return
-    if intent == "participacao_produtos":
-        if df_prod_agent.empty:
-            st.warning("Não foi possível calcular participação de produtos. Confira a aba BASE DE PRODUTOS.")
-        else:
-            out = df_prod_agent.groupby("Produto", as_index=False).agg(FATURAMENTO=("Valor total", "sum"), QTD=("Quantidade", "sum"))
-            total = float(out["FATURAMENTO"].sum())
-            out["PARTICIPAÇÃO_%"] = out["FATURAMENTO"].apply(lambda x: (x / total) if total else 0.0)
-            out = out.sort_values("FATURAMENTO", ascending=False).head(top_n)
-            show = qa_format_financial_table(out, ["FATURAMENTO"], ["PARTICIPAÇÃO_%"], ["QTD"])
-            qa_show_table(show, "Participação por Produto - Agente BI", "participacao_produtos_agente_bi.pdf", top_n)
-        return
-    if intent == "concentracao_clientes":
-        qa_concentracao_clientes(top_n=max(10, top_n))
-        return
-    if intent == "ticket_medio_geral":
-        qa_ticket_medio(d_mes, None, "Ticket Médio Geral - Agente BI", "ticket_medio_geral_agente_bi.pdf", top_n)
-        return
-    if intent == "ticket_medio_clientes":
-        qa_ticket_medio(d_mes, "Cliente", "Ticket Médio por Cliente - Agente BI", "ticket_medio_clientes_agente_bi.pdf", top_n)
-        return
-    if intent == "ticket_medio_uf":
-        qa_ticket_medio(d_mes, "UF", "Ticket Médio por UF - Agente BI", "ticket_medio_uf_agente_bi.pdf", top_n)
-        return
-    if intent == "ticket_medio_cidades":
-        qa_ticket_medio(d_mes, "LOCALIZAÇÃO", "Ticket Médio por Cidade - Agente BI", "ticket_medio_cidades_agente_bi.pdf", top_n)
-        return
-    if intent == "cliente_medio":
-        fat = float(d_mes["Valor total"].sum())
-        qtd_cli = int(d_mes["Cliente"].nunique()) if "Cliente" in d_mes.columns else 0
-        media = fat / qtd_cli if qtd_cli else 0.0
-        st.success(f"Cliente médio no período: {qa_currency(media)}.")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Faturamento", qa_currency(fat))
-        c2.metric("Clientes ativos", qa_int(qtd_cli))
-        c3.metric("Cliente médio", qa_currency(media))
-        return
-    if intent == "clientes_perdidos":
-        qa_clientes_perdidos_novos(pergunta, "perdidos", top_n)
-        return
-    if intent == "clientes_novos":
-        qa_clientes_perdidos_novos(pergunta, "novos", top_n)
-        return
-    if intent == "clientes_inativos":
-        qa_clientes_inativos(pergunta, top_n)
-        return
-    if intent == "frequencia_clientes":
-        qa_frequencia_clientes(top_n)
-        return
-    if intent == "abc_clientes":
-        qa_abc_clientes(top_n=max(top_n, 100))
-        return
-    if intent == "produtos_sem_venda":
-        qa_produtos_sem_venda(top_n=max(top_n, 100))
-        return
-    if intent in ["mix_produtos", "mix_por_cliente", "mix_por_regiao"]:
-        qa_mix_produtos(pergunta, top_n)
-        return
-    if intent == "cross_selling":
-        qa_cross_selling(pergunta, top_n)
-        return
-    if intent == "produtos_menor_margem":
-        qa_produtos_menor_margem(top_n)
-        return
-    if intent == "clientes_menor_margem":
-        qa_menor_margem(d_mes, "Cliente", "Clientes com Menor Margem - Agente BI", "clientes_menor_margem_agente_bi.pdf", top_n)
-        return
-    if intent == "regioes_menor_margem":
-        grupo = "UF" if any(x in pnorm for x in ["uf", "estado"]) else "LOCALIZAÇÃO"
-        qa_menor_margem(d_mes, grupo, "Regiões com Menor Margem - Agente BI", "regioes_menor_margem_agente_bi.pdf", top_n)
-        return
-    if intent == "alertas_comerciais":
-        qa_alertas_comerciais()
-        return
-    if intent == "oportunidades_comerciais":
-        qa_oportunidades_comerciais(top_n)
-        return
-    if intent == "meta_comercial":
-        qa_meta_comercial(pergunta)
-        return
-    if intent == "previsao_fechamento":
-        qa_previsao_fechamento()
-        return
-    if intent == "ritmo_vendas":
-        qa_ritmo_vendas()
-        return
-
-    if intent == "faturamento_mes":
-        fat = float(d_mes["Valor total"].sum())
-        custo = float(d_mes["Valor custo"].sum())
-        margem = fat - custo
-        margem_pct = (margem / fat) if fat else 0.0
-        st.success(f"O faturamento de {label_periodo} foi de {qa_currency(fat)}.")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Faturamento", qa_currency(fat))
-        c2.metric("Custo", qa_currency(custo))
-        c3.metric("Margem Bruta", qa_currency(margem))
-        c4.metric("Margem %", pct_br(margem_pct))
-        return
-
-    if intent == "margem_geral":
-        fat = float(d_mes["Valor total"].sum())
-        custo = float(d_mes["Valor custo"].sum())
-        margem = fat - custo
-        margem_pct = (margem / fat) if fat else 0.0
-        st.success(f"A margem bruta de {label_periodo} foi de {qa_currency(margem)}, equivalente a {pct_br(margem_pct)} do faturamento.")
-        return
-
-    if intent == "crescimento_mes":
-        meses = qa_extract_months(pergunta)
-        if len(meses) >= 2:
-            m1, m2 = meses[0], meses[1]
-            fat1 = float(df_ano[df_ano["MES_NUM"] == m1]["Valor total"].sum())
-            fat2 = float(df_ano[df_ano["MES_NUM"] == m2]["Valor total"].sum())
-            dif = fat2 - fat1
-            pct = (dif / fat1) if fat1 else 0.0
-            st.success(f"De {qa_month_label(m1)} para {qa_month_label(m2)}, o faturamento variou {qa_currency(dif)} ({pct_br(pct)}).")
-            c1, c2, c3 = st.columns(3)
-            c1.metric(qa_month_label(m1), qa_currency(fat1))
-            c2.metric(qa_month_label(m2), qa_currency(fat2))
-            c3.metric("Variação", qa_currency(dif), pct_br(pct))
-            return
-        if mes_num is None:
-            st.warning("Informe o mês. Exemplo: qual foi o crescimento de abril?")
-            return
-        atual = float(df_ano[df_ano["MES_NUM"] == mes_num]["Valor total"].sum())
-        mes_ant = mes_num - 1
-        if mes_ant >= 1:
-            base = float(df_ano[df_ano["MES_NUM"] == mes_ant]["Valor total"].sum())
-            label_base = qa_month_label(mes_ant)
-        else:
-            ano_ant_q = int(ano_sel) - 1
-            base = float(df[(df["ANO"] == ano_ant_q) & (df["MES_NUM"] == 12)]["Valor total"].sum())
-            label_base = f"DEZ/{ano_ant_q}"
-        dif = atual - base
-        pct = (dif / base) if base else 0.0
-        st.success(f"Em {qa_month_label(mes_num)}, o crescimento foi de {qa_currency(dif)} ({pct_br(pct)}) contra {label_base}.")
-        c1, c2, c3 = st.columns(3)
-        c1.metric(qa_month_label(mes_num), qa_currency(atual))
-        c2.metric(label_base, qa_currency(base))
-        c3.metric("Crescimento", qa_currency(dif), pct_br(pct))
-        return
-
-    if intent in ["top_clientes_faturamento", "top_clientes_margem"]:
-        out = qa_aggregate_sales(d_mes, ["Cliente"])
-        ordem = "MARGEM_BRUTA_R$" if intent == "top_clientes_margem" else "FATURAMENTO"
-        out = out.sort_values(ordem, ascending=False).head(top_n)
-        st.success(f"Top {top_n} clientes por {'margem bruta' if ordem == 'MARGEM_BRUTA_R$' else 'faturamento'} em {label_periodo}.")
-        show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-        qa_show_table(show, "Top Clientes - Agente BI", "top_clientes_agente_bi.pdf", top_n)
-        return
-
-    if intent in ["faturamento_uf", "comparativo_uf", "comparativo_uf_margem"]:
-        uf = qa_extract_uf(pergunta)
-        out = qa_aggregate_sales(d_mes, ["UF"])
-        if uf and intent == "faturamento_uf":
-            row = out[out["UF"].astype(str).str.upper() == uf]
-            if row.empty:
-                st.warning(f"Não encontrei faturamento para a UF {uf} em {label_periodo}.")
-                return
-            r = row.iloc[0]
-            st.success(f"O faturamento da UF {uf} em {label_periodo} foi de {qa_currency(r['FATURAMENTO'])}.")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Faturamento", qa_currency(r["FATURAMENTO"]))
-            c2.metric("Custo", qa_currency(r["CUSTO"]))
-            c3.metric("Margem", qa_currency(r["MARGEM_BRUTA_R$"]))
-            c4.metric("Margem %", pct_br(r["MARGEM_BRUTA_%"]))
-            return
-        ordem = "MARGEM_BRUTA_R$" if ("margem" in pnorm or intent == "comparativo_uf_margem") else "FATURAMENTO"
-        out = out.sort_values(ordem, ascending=False)
-        melhor = out.iloc[0] if not out.empty else None
-        if melhor is not None:
-            st.success(f"A UF líder em {label_periodo} é {melhor['UF']} com {qa_currency(melhor[ordem])} em {'margem' if ordem == 'MARGEM_BRUTA_R$' else 'faturamento'}.")
-        show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-        qa_show_table(show, "Comparativo por UF - Agente BI", "comparativo_uf_agente_bi.pdf", 100)
-        return
-
-    if intent == "ranking_cidades":
-        out = qa_aggregate_sales(d_mes, ["LOCALIZAÇÃO"])
-        ordem = "MARGEM_BRUTA_R$" if "margem" in pnorm else "FATURAMENTO"
-        out = out.sort_values(ordem, ascending=False).head(top_n)
-        st.success(f"Top {top_n} cidades/localizações por {'margem' if ordem == 'MARGEM_BRUTA_R$' else 'faturamento'} em {label_periodo}.")
-        show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD_REGISTROS"])
-        qa_show_table(show, "Ranking de Cidades - Agente BI", "ranking_cidades_agente_bi.pdf", top_n)
-        return
-
-    if intent in ["top_produtos_faturamento", "top_produtos_margem", "top_produtos_quantidade"]:
-        if df_prod_agent.empty:
-            st.warning("Não foi possível analisar produtos. Confira se a aba BASE DE PRODUTOS contém Produto, Quantidade, MÊS, ANO, Valor total e Custo total.")
-            return
-        dprod, label_prod, _ = qa_filter_month(df_prod_agent, pergunta)
-        out = dprod.groupby("Produto", as_index=False).agg(
-            QTD=("Quantidade", "sum"),
-            FATURAMENTO=("Valor total", "sum"),
-            CUSTO=("Custo total", "sum"),
-        )
-        out["MARGEM_BRUTA_R$"] = out["FATURAMENTO"] - out["CUSTO"]
-        out["MARGEM_BRUTA_%"] = out.apply(lambda r: (r["MARGEM_BRUTA_R$"] / r["FATURAMENTO"]) if r["FATURAMENTO"] else 0.0, axis=1)
-        if intent == "top_produtos_margem":
-            ordem = "MARGEM_BRUTA_R$"
-        elif intent == "top_produtos_quantidade":
-            ordem = "QTD"
-        else:
-            ordem = "FATURAMENTO"
-        out = out.sort_values(ordem, ascending=False).head(top_n)
-        st.success(f"Top {top_n} produtos por {ordem.lower().replace('_', ' ')} em {label_prod}.")
-        show = qa_format_financial_table(out, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], ["MARGEM_BRUTA_%"], ["QTD"])
-        qa_show_table(show, "Top Produtos - Agente BI", "top_produtos_agente_bi.pdf", top_n)
-        return
-
-    if intent == "giro_produto":
-        if df_prod_agent.empty:
-            st.warning("Não foi possível analisar giro. Confira a aba BASE DE PRODUTOS.")
-            return
-        # Remove palavras comuns para tentar achar o produto
-        termo = re.sub(r"\b(qual|foi|o|a|os|as|giro|do|da|de|produto|produtos|mes|mês|em|no|na|por|favor)\b", " ", qa_norm(pergunta))
-        for nome_mes in list(MESES_LONG.keys()) + MESES_PT:
-            termo = re.sub(rf"\b{qa_norm(nome_mes)}\b", " ", termo)
-        termo = re.sub(r"\b(0?[1-9]|1[0-2])\b", " ", termo)
-        termo = re.sub(r"\s+", " ", termo).strip()
-        opcoes = sorted(df_prod_agent["Produto"].dropna().astype(str).unique().tolist())
-        produto_match = qa_best_match(termo, opcoes, score_min=45) if termo else None
-        dprod, label_prod, _ = qa_filter_month(df_prod_agent, pergunta)
-        if produto_match:
-            dprod = dprod[dprod["Produto"] == produto_match].copy()
-        elif termo:
-            dprod = dprod[dprod["Produto"].apply(lambda x: termo in qa_norm(x))].copy()
-        if dprod.empty:
-            st.warning("Não encontrei produto compatível. Tente escrever uma parte da descrição exatamente como aparece na base.")
-            return
-        giro = dprod.groupby(["Produto", "MES_NUM"], as_index=False).agg(
-            GIRO_QTD=("Quantidade", "sum"),
-            FATURAMENTO=("Valor total", "sum"),
-            CUSTO=("Custo total", "sum"),
-        )
-        giro["MARGEM_BRUTA_R$"] = giro["FATURAMENTO"] - giro["CUSTO"]
-        giro["MÊS"] = giro["MES_NUM"].apply(lambda m: qa_month_label(int(m)) if pd.notna(m) else "-")
-        giro = giro.sort_values(["Produto", "MES_NUM"])
-        produto_txt = f" para {produto_match}" if produto_match else ""
-        st.success(f"Giro encontrado{produto_txt} em {label_prod}.")
-        show = giro[["Produto", "MÊS", "GIRO_QTD", "FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"]].copy()
-        show = qa_format_financial_table(show, ["FATURAMENTO", "CUSTO", "MARGEM_BRUTA_R$"], [], ["GIRO_QTD"])
-        qa_show_table(show, "Giro de Produto - Agente BI", "giro_produto_agente_bi.pdf", 200)
-        return
-
-    if intent in ["clientes_queda", "clientes_crescimento"]:
-        meses = qa_extract_months(pergunta)
-        if len(meses) < 2:
-            st.warning("Informe dois meses para comparação. Exemplo: quais clientes caíram de março para abril?")
-            return
-        m1, m2 = meses[0], meses[1]
-        base = df_ano[df_ano["MES_NUM"].isin([m1, m2])].copy()
-        pv = base.pivot_table(index="Cliente", columns="MES_NUM", values="Valor total", aggfunc="sum", fill_value=0.0)
-        for m in [m1, m2]:
-            if m not in pv.columns:
-                pv[m] = 0.0
-        pv = pv[[m1, m2]].reset_index()
-        col1 = f"FAT_{qa_month_label(m1)}"
-        col2 = f"FAT_{qa_month_label(m2)}"
-        pv.columns = ["Cliente", col1, col2]
-        pv["DIFERENÇA_R$"] = pv[col2] - pv[col1]
-        pv["VARIAÇÃO_%"] = pv.apply(lambda r: (r["DIFERENÇA_R$"] / r[col1]) if r[col1] else (1.0 if r[col2] > 0 else 0.0), axis=1)
-        if intent == "clientes_queda":
-            out = pv[pv["DIFERENÇA_R$"] < 0].sort_values("DIFERENÇA_R$", ascending=True).head(top_n)
-            st.success(f"Top {top_n} clientes que caíram de {qa_month_label(m1)} para {qa_month_label(m2)}.")
-        else:
-            out = pv[pv["DIFERENÇA_R$"] > 0].sort_values("DIFERENÇA_R$", ascending=False).head(top_n)
-            st.success(f"Top {top_n} clientes que cresceram de {qa_month_label(m1)} para {qa_month_label(m2)}.")
-        show = qa_format_financial_table(out, [col1, col2, "DIFERENÇA_R$"], ["VARIAÇÃO_%"])
-        qa_show_table(show, "Comparativo de Clientes - Agente BI", "comparativo_clientes_agente_bi.pdf", top_n)
-        return
-
-    st.warning("Não consegui identificar essa pergunta ainda. Use um dos exemplos abaixo ou escreva usando termos como faturamento, cliente, produto, UF, cidade, margem, crescimento ou giro.")
-
-
-# Interface do agente em formato de chat
-if "historico_agente_bi" not in st.session_state:
-    st.session_state["historico_agente_bi"] = []
-
-with st.chat_message("assistant"):
-    st.write("Olá. Sou o assistente comercial do dashboard. Digite sua pergunta abaixo e eu calculo a resposta usando a base carregada.")
-
-pergunta_agent = st.chat_input(
-    "Pergunte sobre vendas, margem, clientes, produtos, UF, cidades, crescimento ou metas..."
-)
-
-if pergunta_agent:
-    st.session_state["historico_agente_bi"].append(pergunta_agent)
-    with st.chat_message("user"):
-        st.write(pergunta_agent)
-    with st.chat_message("assistant"):
-        qa_answer(pergunta_agent)
-
-with st.expander("Histórico desta sessão", expanded=False):
-    if st.session_state["historico_agente_bi"]:
-        for i, q in enumerate(reversed(st.session_state["historico_agente_bi"][-20:]), start=1):
-            st.write(f"{i}. {q}")
-    else:
-        st.caption("Nenhuma pergunta feita ainda.")
-
-# Biblioteca de perguntas: mais de 100 parâmetros prontos
-perguntas_exemplos = []
-meses_exemplos = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
-ufs_exemplos = sorted({str(u).upper().strip() for u in df["UF"].dropna().unique().tolist() if str(u).strip()}) or ["DF", "GO", "MG"]
-
-for mes in meses_exemplos:
-    perguntas_exemplos.extend([
-        f"Qual foi o faturamento de {mes}?",
-        f"Qual foi a margem de {mes}?",
-        f"Qual foi o crescimento de {mes}?",
-        f"Quais são os top 10 clientes de {mes}?",
-        f"Quais são os top 20 clientes de {mes}?",
-        f"Quais clientes deixam mais margem em {mes}?",
-        f"Quais são os top 10 produtos em faturamento de {mes}?",
-        f"Quais são os top 10 produtos em margem de {mes}?",
-        f"Quais produtos mais venderam em quantidade em {mes}?",
-        f"Qual cidade teve maior faturamento em {mes}?",
-        f"Qual UF deixou mais margem em {mes}?",
-        f"Qual o comparativo de vendas por UF em {mes}?",
-    ])
-
-for uf in ufs_exemplos:
-    perguntas_exemplos.extend([
-        f"Qual meu faturamento na UF {uf}?",
-        f"Qual meu faturamento na UF {uf} em março?",
-        f"Qual meu faturamento na UF {uf} em abril?",
-        f"Qual a margem da UF {uf}?",
-    ])
-
-pares_meses = [("janeiro", "fevereiro"), ("fevereiro", "março"), ("março", "abril"), ("abril", "maio"), ("maio", "junho"), ("junho", "julho"), ("julho", "agosto"), ("agosto", "setembro"), ("setembro", "outubro"), ("outubro", "novembro"), ("novembro", "dezembro")]
-for a, b in pares_meses:
-    perguntas_exemplos.extend([
-        f"Quais clientes caíram de {a} para {b}?",
-        f"Quais clientes aumentaram de {a} para {b}?",
-        f"Quais clientes cresceram de {a} para {b}?",
-        f"Qual foi o crescimento de {a} para {b}?",
-    ])
-
-perguntas_exemplos.extend([
-    "Comparar faturamento de 2026 com 2025",
-    "Comparar margem de 2026 com 2025",
-    "Comparar desempenho por UF de 2026 com 2025",
-    "Comparar estados de 2026 com 2025",
-    "Comparar cidades de 2026 com 2025",
-    "Comparar clientes de 2026 com 2025",
-    "Quais clientes cresceram de 2025 para 2026?",
-    "Quais clientes caíram de 2025 para 2026?",
-    "Comparar produtos de 2026 com 2025",
-    "Quais produtos cresceram de 2025 para 2026?",
-    "Quais produtos caíram de 2025 para 2026?",
-    "Comparar giro dos produtos de 2026 com 2025",
-    "Comparar faturamento por UF em março de 2026 com 2025",
-    "Comparar clientes em abril de 2026 com 2025",
-])
-
-perguntas_exemplos.extend([
-    "Quais são meus top 10 clientes?",
-    "Quais são meus top 20 clientes?",
-    "Quais são meus top 50 clientes?",
-    "Quais clientes deixam mais margem?",
-    "Qual o ranking de clientes por margem?",
-    "Qual o ranking de clientes por faturamento?",
-    "Qual o comparativo de vendas por UF?",
-    "Qual região ou estado deixa mais margem?",
-    "Qual UF tem maior faturamento?",
-    "Qual UF tem maior margem?",
-    "Qual cidade onde eu tenho maior faturamento?",
-    "Quais são as top 10 cidades por faturamento?",
-    "Quais são as top 20 cidades por margem?",
-    "Quais são meus top 10 produtos em faturamento?",
-    "Quais são meus top 20 produtos em faturamento?",
-    "Quais são meus top 10 produtos em margem?",
-    "Quais são meus top 20 produtos em margem?",
-    "Quais produtos mais vendem em quantidade?",
-    "Qual foi o giro do produto thinner?",
-    "Qual foi o giro do produto esmalte?",
-    "Qual foi o giro do produto verniz?",
-    "Qual foi o giro do produto catalisador?",
-    "Qual foi o giro do produto massa?",
-    "Qual foi o giro do produto primer?",
-    "Qual foi o giro do produto lixa?",
-    "Qual foi o giro do produto disco?",
-    "Qual foi o giro do produto tinta?",
-    "Qual foi o giro do produto fundo?",
-    "Qual foi o giro do produto cola?",
-    "Qual foi o giro do produto silicone?",
-    "Qual foi o giro do produto fita?",
-])
-
-perguntas_exemplos = list(dict.fromkeys(perguntas_exemplos))
-
-with st.expander(f"Biblioteca de perguntas possíveis ({len(perguntas_exemplos)} exemplos)", expanded=False):
-    st.caption("Estes são exemplos. O agente também entende variações parecidas, desde que tenham termos como faturamento, crescimento, cliente, produto, UF, cidade, margem ou giro.")
-    st.dataframe(pd.DataFrame({"Perguntas possíveis": perguntas_exemplos}), use_container_width=True, hide_index=True)
