@@ -441,6 +441,13 @@ def normalizar_classificacao_cliente(v) -> str:
     if re.search(r"\b(SEM|S)\b.*\bMAQUINA\b", chave) or re.search(r"\bEMPRESA\b.*\bS\s*MAQUINA\b", chave):
         return "Empresa sem máquina"
 
+    # Consolida Produtos Eletrônicos e Distribuidores de Produtos Eletrônicos em uma única classificação.
+    if (
+        re.search(r"\bPRODUTOS?\b.*\bELETRONIC", chave)
+        or re.search(r"\bDISTRIBUIDOR(?:ES)?\b.*\bPRODUTOS?\b.*\bELETRONIC", chave)
+    ):
+        return "Produtos Eletrônicos"
+
     # Para as demais classificações, remove diferenças apenas de caixa/espaçamento/acentuação
     # usando a primeira grafia padronizada por chave no tratamento posterior.
     return s_original.strip()
