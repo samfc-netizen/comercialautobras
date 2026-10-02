@@ -1145,11 +1145,12 @@ botao_download_pdf(rel_mes_show, "Relação Financeira por Mês", "relacao_finan
 st.divider()
 
 # =============================
-# 3) MAPA DO BRASIL POR UF
+# 3) MAPA DO BRASIL POR UF + DRILL GEOGRÁFICO
 # =============================
 st.subheader("Mapa do Brasil — Faturamento por UF")
 
-# Coordenadas aproximadas dos centroides das UFs para posicionar os valores no mapa.
+# Coordenadas aproximadas dos centroides das UFs. Os pontos permanecem na posição
+# geográfica real; os rótulos usam deslocamentos próprios para evitar sobreposição.
 UF_COORDS = {
     "AC": (-8.77, -70.55), "AL": (-9.62, -36.82), "AP": (1.41, -51.77),
     "AM": (-3.47, -65.10), "BA": (-12.96, -41.70), "CE": (-5.20, -39.53),
@@ -1162,27 +1163,68 @@ UF_COORDS = {
     "SP": (-22.19, -48.79), "SE": (-10.57, -37.45), "TO": (-9.46, -48.26),
 }
 
-uf_mapa = (
+# Deslocamento do TEXTO (não do ponto) em graus. Ajuda principalmente no Centro-Oeste
+# e Nordeste, onde centroides ficam próximos. A linha liga o rótulo à posição real.
+UF_LABEL_OFFSET = {
+    "DF": (1.45, 2.15),
+    "GO": (-1.20, -1.85),
+    "AL": (-0.70, 1.25),
+    "SE": (0.65, 1.35),
+    "PB": (0.80, 1.25),
+    "PE": (-0.55, 1.55),
+    "RN": (0.95, 1.05),
+    "ES": (-0.40, 1.35),
+    "RJ": (-0.90, 1.25),
+    "SC": (-0.35, 1.05),
+}
+
+uf_mapa_all = (
     df_f.assign(UF=df_f["UF"].fillna("").astype(str).str.upper().str.strip())
     .groupby("UF", as_index=False)["Valor total"].sum()
     .rename(columns={"Valor total": "FATURAMENTO"})
 )
-uf_mapa = uf_mapa[uf_mapa["UF"].isin(UF_COORDS)].copy()
+uf_mapa = uf_mapa_all[uf_mapa_all["UF"].isin(UF_COORDS)].copy()
 uf_mapa["LAT"] = uf_mapa["UF"].map(lambda x: UF_COORDS[x][0])
 uf_mapa["LON"] = uf_mapa["UF"].map(lambda x: UF_COORDS[x][1])
+uf_mapa["LABEL_LAT"] = uf_mapa.apply(lambda r: r["LAT"] + UF_LABEL_OFFSET.get(r["UF"], (0.85, 0))[0], axis=1)
+uf_mapa["LABEL_LON"] = uf_mapa.apply(lambda r: r["LON"] + UF_LABEL_OFFSET.get(r["UF"], (0.85, 0))[1], axis=1)
 uf_mapa["LABEL"] = uf_mapa.apply(lambda r: f"<b>{r['UF']}</b><br>R$ {format_brl(r['FATURAMENTO'])}", axis=1)
 
 fig_brasil = go.Figure()
+
+# Linhas-guia para rótulos deslocados.
+for _, r in uf_mapa.iterrows():
+    if r["UF"] in UF_LABEL_OFFSET:
+        fig_brasil.add_trace(go.Scattergeo(
+            lon=[r["LON"], r["LABEL_LON"]], lat=[r["LAT"], r["LABEL_LAT"]],
+            mode="lines", line=dict(width=1.2, color="#6B7C93"),
+            hoverinfo="skip", showlegend=False
+        ))
+
+# Pontos nas posições reais das UFs.
+max_fat_uf = float(uf_mapa["FATURAMENTO"].max()) if not uf_mapa.empty else 0.0
 fig_brasil.add_trace(go.Scattergeo(
     lon=uf_mapa["LON"], lat=uf_mapa["LAT"],
-    text=uf_mapa["LABEL"], mode="markers+text", textposition="top center",
+    mode="markers",
     customdata=uf_mapa[["UF", "FATURAMENTO"]],
     marker=dict(
-        size=uf_mapa["FATURAMENTO"].apply(lambda v: 12 + 26 * (v / uf_mapa["FATURAMENTO"].max()) if uf_mapa["FATURAMENTO"].max() else 12),
-        opacity=0.72, line=dict(width=1, color="white")
+        size=uf_mapa["FATURAMENTO"].apply(lambda v: 10 + 22 * (v / max_fat_uf) if max_fat_uf else 10),
+        opacity=0.78, line=dict(width=1.3, color="white")
     ),
-    hovertemplate="<b>%{customdata[0]}</b><br>Faturamento: R$ %{customdata[1]:,.2f}<extra></extra>"
+    hovertemplate="<b>%{customdata[0]}</b><br>Faturamento: R$ %{customdata[1]:,.2f}<extra></extra>",
+    showlegend=False
 ))
+
+# Rótulos em camada separada: fonte maior, caixa branca e posição independente.
+fig_brasil.add_trace(go.Scattergeo(
+    lon=uf_mapa["LABEL_LON"], lat=uf_mapa["LABEL_LAT"],
+    text=uf_mapa["LABEL"], mode="text",
+    textfont=dict(size=13, color="#102A43", family="Arial Black"),
+    customdata=uf_mapa[["UF", "FATURAMENTO"]],
+    hovertemplate="<b>%{customdata[0]}</b><br>Faturamento: R$ %{customdata[1]:,.2f}<extra></extra>",
+    showlegend=False
+))
+
 fig_brasil.update_geos(
     scope="south america", projection_type="mercator",
     lataxis_range=[-35, 6], lonaxis_range=[-75, -32],
@@ -1190,14 +1232,117 @@ fig_brasil.update_geos(
     showcoastlines=True, coastlinecolor="#AAB7C4", bgcolor="rgba(0,0,0,0)"
 )
 fig_brasil.update_layout(
-    height=650, margin=dict(l=0, r=0, t=20, b=0),
-    title="Faturamento por UF — valores posicionados geograficamente"
+    height=690, margin=dict(l=0, r=0, t=20, b=0),
+    title="Faturamento por UF — rótulos reposicionados para melhorar a leitura"
 )
 st.plotly_chart(fig_brasil, use_container_width=True)
 
-ufs_fora_mapa = sorted(set(uf_mapa["UF"]) - set(UF_COORDS))
+ufs_fora_mapa = sorted(set(uf_mapa_all["UF"]) - set(UF_COORDS) - {"", "MERCADO LIVRE"})
 if ufs_fora_mapa:
     st.caption("UFs não posicionadas no mapa: " + ", ".join(ufs_fora_mapa))
+
+# -----------------------------
+# DRILL GEOGRÁFICO: UF > CIDADE > BAIRRO
+# -----------------------------
+st.markdown("#### Drill geográfico — UF → Cidade → Bairro")
+st.caption("Selecione uma UF para abrir as cidades. Depois selecione uma cidade para detalhar os bairros.")
+
+geo_base = df_f.copy()
+for c in ["UF", "LOCALIZAÇÃO", "BAIRRO"]:
+    geo_base[c] = geo_base[c].fillna("").astype(str).str.strip()
+geo_base["UF"] = geo_base["UF"].str.upper()
+
+ufs_geo = sorted([u for u in geo_base["UF"].unique().tolist() if u and u != "MERCADO LIVRE"])
+geo_col1, geo_col2 = st.columns(2)
+with geo_col1:
+    geo_uf_sel = st.selectbox("UF para detalhar", ["(Selecione)"] + ufs_geo, key="geo_uf_drill")
+
+if geo_uf_sel != "(Selecione)":
+    geo_uf = geo_base[geo_base["UF"] == geo_uf_sel].copy()
+    fat_geo_uf = float(geo_uf["Valor total"].sum())
+    fat_geo_geral = float(geo_base["Valor total"].sum())
+
+    cidades = (
+        geo_uf.assign(CIDADE=geo_uf["LOCALIZAÇÃO"].replace("", "NÃO INFORMADO"))
+        .groupby("CIDADE", as_index=False)["Valor total"].sum()
+        .rename(columns={"Valor total": "FATURAMENTO"})
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+    cidades["% DA UF"] = cidades["FATURAMENTO"].apply(lambda x: x / fat_geo_uf if fat_geo_uf else 0.0)
+    cidades["% DO GERAL"] = cidades["FATURAMENTO"].apply(lambda x: x / fat_geo_geral if fat_geo_geral else 0.0)
+
+    with geo_col2:
+        cidade_sel = st.selectbox("Cidade para detalhar", ["(Todas)"] + cidades["CIDADE"].tolist(), key="geo_cidade_drill")
+
+    gm1, gm2, gm3 = st.columns(3)
+    gm1.metric(f"Faturamento {geo_uf_sel}", f"R$ {format_brl(fat_geo_uf)}")
+    gm2.metric("Participação no Geral", pct_br(fat_geo_uf / fat_geo_geral if fat_geo_geral else 0.0))
+    gm3.metric("Cidades com faturamento", f"{len(cidades):,}".replace(",", "."))
+
+    # Gráfico das cidades — limita visualmente às 15 maiores, mantendo a tabela completa.
+    cidades_plot = cidades.head(15).sort_values("FATURAMENTO", ascending=True)
+    fig_cidades = px.bar(
+        cidades_plot, x="FATURAMENTO", y="CIDADE", orientation="h",
+        title=f"Top cidades de {geo_uf_sel} por faturamento",
+        text="FATURAMENTO"
+    )
+    fig_cidades.update_traces(
+        texttemplate="R$ %{text:,.0f}", textposition="outside",
+        hovertemplate="<b>%{y}</b><br>Faturamento: R$ %{x:,.2f}<extra></extra>"
+    )
+    fig_cidades.update_layout(height=max(380, 30 * len(cidades_plot) + 100), xaxis_title="Faturamento", yaxis_title="")
+    st.plotly_chart(fig_cidades, use_container_width=True)
+
+    cidades_show = cidades.copy()
+    cidades_show["FATURAMENTO"] = cidades_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+    cidades_show["% DA UF"] = cidades_show["% DA UF"].apply(pct_br)
+    cidades_show["% DO GERAL"] = cidades_show["% DO GERAL"].apply(pct_br)
+    st.dataframe(cidades_show, use_container_width=True, hide_index=True)
+
+    if cidade_sel != "(Todas)":
+        st.markdown(f"##### Bairros — {cidade_sel} / {geo_uf_sel}")
+        if cidade_sel == "NÃO INFORMADO":
+            geo_cidade = geo_uf[geo_uf["LOCALIZAÇÃO"] == ""].copy()
+        else:
+            geo_cidade = geo_uf[geo_uf["LOCALIZAÇÃO"] == cidade_sel].copy()
+
+        fat_geo_cidade = float(geo_cidade["Valor total"].sum())
+        bairros = (
+            geo_cidade.assign(BAIRRO_DRILL=geo_cidade["BAIRRO"].replace("", "NÃO INFORMADO"))
+            .groupby("BAIRRO_DRILL", as_index=False)["Valor total"].sum()
+            .rename(columns={"BAIRRO_DRILL": "BAIRRO", "Valor total": "FATURAMENTO"})
+            .sort_values("FATURAMENTO", ascending=False)
+        )
+        bairros["% DA CIDADE"] = bairros["FATURAMENTO"].apply(lambda x: x / fat_geo_cidade if fat_geo_cidade else 0.0)
+        bairros["% DA UF"] = bairros["FATURAMENTO"].apply(lambda x: x / fat_geo_uf if fat_geo_uf else 0.0)
+        bairros["% DO GERAL"] = bairros["FATURAMENTO"].apply(lambda x: x / fat_geo_geral if fat_geo_geral else 0.0)
+
+        bm1, bm2, bm3 = st.columns(3)
+        bm1.metric(f"Faturamento {cidade_sel}", f"R$ {format_brl(fat_geo_cidade)}")
+        bm2.metric(f"Participação em {geo_uf_sel}", pct_br(fat_geo_cidade / fat_geo_uf if fat_geo_uf else 0.0))
+        bm3.metric("Bairros com faturamento", f"{len(bairros):,}".replace(",", "."))
+
+        bairros_plot = bairros.head(15).sort_values("FATURAMENTO", ascending=True)
+        fig_bairros = px.bar(
+            bairros_plot, x="FATURAMENTO", y="BAIRRO", orientation="h",
+            title=f"Top bairros de {cidade_sel} por faturamento",
+            text="FATURAMENTO"
+        )
+        fig_bairros.update_traces(
+            texttemplate="R$ %{text:,.0f}", textposition="outside",
+            hovertemplate="<b>%{y}</b><br>Faturamento: R$ %{x:,.2f}<extra></extra>"
+        )
+        fig_bairros.update_layout(height=max(380, 30 * len(bairros_plot) + 100), xaxis_title="Faturamento", yaxis_title="")
+        st.plotly_chart(fig_bairros, use_container_width=True)
+
+        bairros_show = bairros.copy()
+        bairros_show["FATURAMENTO"] = bairros_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+        bairros_show["% DA CIDADE"] = bairros_show["% DA CIDADE"].apply(pct_br)
+        bairros_show["% DA UF"] = bairros_show["% DA UF"].apply(pct_br)
+        bairros_show["% DO GERAL"] = bairros_show["% DO GERAL"].apply(pct_br)
+        st.dataframe(bairros_show, use_container_width=True, hide_index=True)
+else:
+    st.info("Selecione uma UF para abrir o detalhamento por cidade e bairro.")
 
 st.divider()
 
