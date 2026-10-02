@@ -180,9 +180,60 @@ div.stDownloadButton > button p {
 
 
 .autobras-topbar-copy {min-width:0;}
-.autobras-topbar-logos {display:flex;align-items:center;gap:8px;flex-shrink:0;}
-.autobras-topbar-logos img {width:64px;height:64px;object-fit:cover;border-radius:50%;display:block;box-shadow:0 4px 12px rgba(0,0,0,.16);}
-@media (max-width: 700px) { .autobras-topbar-logos img {width:48px;height:48px;} .autobras-topbar h1 {font-size:23px;} }
+.autobras-topbar-logos {
+    display:flex;
+    align-items:center;
+    gap:14px;
+    flex-shrink:0;
+    margin-left:24px;
+    padding:7px 10px;
+    border-radius:14px;
+    background:rgba(255,255,255,.08);
+    border:1px solid rgba(255,255,255,.12);
+}
+.autobras-logo-evo-wrap {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:92px;
+    height:42px;
+    padding:5px 9px;
+    border-radius:10px;
+    background:#0B1118;
+}
+.autobras-logo-autobras-wrap {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:122px;
+    height:42px;
+    padding:4px 8px;
+    border-radius:10px;
+    background:#FFFFFF;
+}
+.autobras-logo-evo-wrap img,
+.autobras-logo-autobras-wrap img {
+    display:block;
+    max-width:100%;
+    max-height:100%;
+    width:auto;
+    height:auto;
+    object-fit:contain;
+    border-radius:0;
+    box-shadow:none;
+}
+.autobras-logo-separator {
+    width:1px;
+    height:28px;
+    background:rgba(255,255,255,.24);
+}
+@media (max-width: 700px) {
+    .autobras-topbar-logos {gap:7px;margin-left:8px;padding:5px 7px;}
+    .autobras-logo-evo-wrap {width:66px;height:34px;padding:4px 6px;}
+    .autobras-logo-autobras-wrap {width:88px;height:34px;padding:3px 6px;}
+    .autobras-logo-separator {height:22px;}
+    .autobras-topbar h1 {font-size:23px;}
+}
 
 .autobras-topbar h1 {
     color: white !important;
@@ -766,8 +817,13 @@ st.markdown(f"""
         <p>Inteligência comercial • desempenho • clientes • regiões • produtos</p>
     </div>
     <div class="autobras-topbar-logos">
-        <img src="data:image/png;base64,{EVO_LOGO_B64}" alt="Evo">
-        <img src="data:image/png;base64,{AUTOBRAS_LOGO_B64}" alt="Autobrás">
+        <div class="autobras-logo-evo-wrap">
+            <img src="data:image/png;base64,{EVO_LOGO_B64}" alt="Evo">
+        </div>
+        <div class="autobras-logo-separator"></div>
+        <div class="autobras-logo-autobras-wrap">
+            <img src="data:image/png;base64,{AUTOBRAS_LOGO_B64}" alt="Autobrás">
+        </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
