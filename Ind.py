@@ -905,18 +905,11 @@ if arquivos_mensais:
 if arquivos_prod_mensais:
     st.caption("Arquivos mensais de produtos incorporados: " + ", ".join(arquivos_prod_mensais))
 
+# Pendências cadastrais são reunidas em um único popover compacto mais abaixo.
+cad_nao_localizado = pd.DataFrame(columns=["Cliente", "FATURAMENTO"])
 if not clientes_sem_cadastro.empty:
     mask_ml_pend = clientes_sem_cadastro["Cliente"].apply(normalize_text_key).str.contains(r"\bMERCADO\s+LIVRE\b", regex=True, na=False)
     cad_nao_localizado = clientes_sem_cadastro.loc[~mask_ml_pend].copy()
-    if not cad_nao_localizado.empty:
-        st.warning(
-            f"Atenção cadastral: {cad_nao_localizado['Cliente'].nunique()} cliente(s) das vendas mensais "
-            "não foram encontrados no CADASTRO DE CLIENTES nem por Razão Social nem por Nome Fantasia."
-        )
-        with st.expander("Ver clientes não encontrados no cadastro"):
-            cad_show = cad_nao_localizado.copy()
-            cad_show["FATURAMENTO"] = cad_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
-            st.dataframe(cad_show, use_container_width=True, hide_index=True)
 
 # Regra especial: vendas do cliente Mercado Livre são pulverizadas em todo o Brasil.
 # Para fins gerenciais, a UF é tratada como "MERCADO LIVRE" e o cliente não entra
@@ -937,16 +930,36 @@ if mask_geo_incompleta.any():
         .sort_values("FATURAMENTO", ascending=False)
     )
     qtd_geo = int(geo_pend["Cliente"].nunique())
-    st.warning(
-        f"Atenção cadastral: {qtd_geo} cliente(s) estão sem UF e/ou cidade/localização. "
-        "Revise o arquivo de cadastro de clientes para completar esses dados."
-    )
-    with st.expander("Ver clientes com UF/cidade não encontrada"):
-        geo_show = geo_pend.copy()
-        geo_show["UF"] = geo_show["UF"].replace("", "NÃO INFORMADO")
-        geo_show["LOCALIZAÇÃO"] = geo_show["LOCALIZAÇÃO"].replace("", "NÃO INFORMADO")
-        geo_show["FATURAMENTO"] = geo_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
-        st.dataframe(geo_show, use_container_width=True, hide_index=True)
+else:
+    geo_pend = pd.DataFrame(columns=["Cliente", "UF", "LOCALIZAÇÃO", "FATURAMENTO"])
+    qtd_geo = 0
+
+# Card/balão único de pendências: só aparece quando existe algo para revisar.
+_pend_clientes = set(cad_nao_localizado.get("Cliente", pd.Series(dtype=str)).dropna().astype(str))
+_pend_clientes.update(geo_pend.get("Cliente", pd.Series(dtype=str)).dropna().astype(str))
+_qtd_pend_total = len(_pend_clientes)
+
+if _qtd_pend_total > 0:
+    with st.popover(f"⚠️  Pendências cadastrais  ·  {_qtd_pend_total} cliente(s)", use_container_width=False):
+        st.markdown("#### Pendências cadastrais")
+        st.caption("Revise os registros abaixo para manter as análises de clientes e geografia completas.")
+
+        if not cad_nao_localizado.empty:
+            qtd_cad = int(cad_nao_localizado["Cliente"].nunique())
+            st.markdown(f"**Não encontrados no cadastro · {qtd_cad}**")
+            st.caption("Clientes das vendas mensais sem correspondência por Razão Social ou Nome Fantasia.")
+            cad_show = cad_nao_localizado.copy()
+            cad_show["FATURAMENTO"] = cad_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+            st.dataframe(cad_show, use_container_width=True, hide_index=True)
+
+        if not geo_pend.empty:
+            st.markdown(f"**UF/Cidade incompleta · {qtd_geo}**")
+            st.caption("Clientes sem UF e/ou cidade/localização no cadastro.")
+            geo_show = geo_pend.copy()
+            geo_show["UF"] = geo_show["UF"].replace("", "NÃO INFORMADO")
+            geo_show["LOCALIZAÇÃO"] = geo_show["LOCALIZAÇÃO"].replace("", "NÃO INFORMADO")
+            geo_show["FATURAMENTO"] = geo_show["FATURAMENTO"].apply(lambda x: f"R$ {format_brl(x)}")
+            st.dataframe(geo_show, use_container_width=True, hide_index=True)
 
 # =============================
 # FILTROS (ANO + PERÍODO)
